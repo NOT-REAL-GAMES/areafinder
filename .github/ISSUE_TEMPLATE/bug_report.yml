@@ -1,0 +1,42 @@
+name: Bug report
+description: Report reproducible incorrect behavior in Areafinder.
+title: "[Bug]: "
+labels:
+  - bug
+body:
+  - type: markdown
+    attributes:
+      value: Thanks for helping improve Areafinder.
+  - type: input
+    id: unity-version
+    attributes:
+      label: Unity version
+      placeholder: 6000.0.0f1
+    validations:
+      required: true
+  - type: input
+    id: package-version
+    attributes:
+      label: Areafinder version
+      placeholder: 0.1.0
+    validations:
+      required: true
+  - type: textarea
+    id: description
+    attributes:
+      label: Description
+      description: What happened, and what did you expect instead?
+    validations:
+      required: true
+  - type: textarea
+    id: reproduction
+    attributes:
+      label: Reproduction steps
+      description: Provide the smallest sequence that reproduces the problem.
+    validations:
+      required: true
+  - type: textarea
+    id: logs
+    attributes:
+      label: Logs or screenshots
+      render: shell

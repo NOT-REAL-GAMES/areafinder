@@ -1,0 +1,17 @@
+{
+  "name": "com.notrealgames.areafinder",
+  "version": "0.1.0",
+  "displayName": "Areafinder",
+  "description": "A foundation for custom navigation and pathfinding in Unity.",
+  "unity": "6000.0",
+  "author": {
+    "name": "Not Real Games"
+  },
+  "license": "Refer to LICENSE.md file",
+  "keywords": [
+    "navigation",
+    "pathfinding",
+    "ai"
+  ],
+  "dependencies": {}
+}

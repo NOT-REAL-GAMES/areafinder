@@ -1,0 +1,21 @@
+{
+  "name": "NotRealGames.Areafinder.Tests",
+  "rootNamespace": "NotRealGames.Areafinder.Tests",
+  "references": [
+    "NotRealGames.Areafinder"
+  ],
+  "optionalUnityReferences": [
+    "TestAssemblies"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [
+    "UNITY_INCLUDE_TESTS"
+  ],
+  "versionDefines": [],
+  "noEngineReferences": false
+}
