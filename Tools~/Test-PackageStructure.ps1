@@ -75,7 +75,7 @@ if ($null -ne $manifest) {
     Assert-Equal $manifest.unity '6000.7' 'Unity version'
     Assert-Equal $manifest.unityRelease '0a6' 'Unity release'
     Assert-Equal $manifest.author.name 'Not Real Games' 'Package author'
-    Assert-Equal $manifest.license 'Refer to LICENSE.md file' 'Package license'
+    Assert-Equal $manifest.license 'MIT' 'Package license'
 }
 
 $assemblyExpectations = @(

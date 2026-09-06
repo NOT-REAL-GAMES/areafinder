@@ -8,7 +8,7 @@
   "author": {
     "name": "Not Real Games"
   },
-  "license": "Refer to LICENSE.md file",
+  "license": "MIT",
   "keywords": [
     "navigation",
     "pathfinding",

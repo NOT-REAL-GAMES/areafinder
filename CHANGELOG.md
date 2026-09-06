@@ -23,6 +23,7 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 - Raised the deliberate development baseline to Unity `6000.7.0a6`.
 - Added Collections `6.7.0` and Burst `1.8.25` after the managed behavior contract was established.
 - Retained fixed-stride semantic storage for bake schema 1; player/Burst evidence remains required before freezing the 1.0 schema.
+- Licensed Areafinder under the MIT License.
 
 ### Fixed
 

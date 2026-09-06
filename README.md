@@ -114,4 +114,4 @@ See [the contribution guide](.github/CONTRIBUTING.md).
 
 ## License
 
-No license has been selected. See [LICENSE.md](LICENSE.md) before using or distributing this package.
+Areafinder is available under the [MIT License](LICENSE.md).
