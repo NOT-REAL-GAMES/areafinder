@@ -1,0 +1,652 @@
+using System;
+using System.Collections.Generic;
+using NUnit.Framework;
+using UnityEngine;
+
+namespace NotRealGames.Areafinder.Tests
+{
+    public sealed class NavigationWorldTests
+    {
+        private readonly List<UnityEngine.Object> _assets = new List<UnityEngine.Object>();
+
+        [TearDown]
+        public void TearDown()
+        {
+            for (int index = _assets.Count - 1; index >= 0; index--)
+            {
+                UnityEngine.Object.DestroyImmediate(_assets[index]);
+            }
+
+            _assets.Clear();
+        }
+
+        [Test]
+        public void RequestMovesThroughExplicitLifecycleAndReturnsStructuredLocalGuidance()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            PathRequestHandle handle = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaA));
+
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Queued));
+            world.Tick(1);
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.RunningGlobal));
+            world.Tick(1);
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.RunningLocal));
+            world.Tick(1);
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.RunningLocal),
+                "terminal publication is deferred to a later tick");
+            world.Tick(0);
+
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Completed));
+            Assert.That(world.TryGetPath(handle, out NavigationPathView path), Is.True);
+            Assert.That(path.AreaCount, Is.EqualTo(1));
+            Assert.That(path.PortalTransitionCount, Is.Zero);
+            Assert.That(path.PolygonCount, Is.EqualTo(1));
+            Assert.That(path.SteeringTargetCount, Is.EqualTo(1));
+            Assert.That(path.GetSteeringTarget(0), Is.EqualTo(new Vector3(0.75f, 0f, 0.75f)));
+            Assert.That(world.IsCurrent(path), Is.True);
+        }
+
+        [Test]
+        public void CrossAreaRouteCombinesThreeLocalSegmentsAndTwoPortals()
+        {
+            TestWorld fixture = CreateThreeAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            PathRequestHandle handle = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaC));
+
+            Complete(world, handle);
+
+            Assert.That(world.TryGetPath(handle, out NavigationPathView path), Is.True);
+            Assert.That(path.AreaCount, Is.EqualTo(3));
+            Assert.That(path.PortalTransitionCount, Is.EqualTo(2));
+            Assert.That(path.GetArea(0).AreaId, Is.EqualTo(fixture.AreaA.Id));
+            Assert.That(path.GetArea(1).AreaId, Is.EqualTo(fixture.AreaB.Id));
+            Assert.That(path.GetArea(2).AreaId, Is.EqualTo(fixture.AreaC.Id));
+            Assert.That(path.GetPortalTransition(0).PortalId, Is.EqualTo(fixture.PortalAB.Id));
+            Assert.That(path.GetPortalTransition(1).PortalId, Is.EqualTo(fixture.PortalBC.Id));
+        }
+
+        [Test]
+        public void DirectionalPortalDoesNotInventAReverseRoute()
+        {
+            TestWorld fixture = CreateThreeAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            PathRequestHandle handle = world.Submit(Query(fixture, fixture.AreaC, fixture.AreaA));
+
+            Complete(world, handle);
+
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Failed));
+            Assert.That(world.TryGetFailure(handle, out PathFailureReason failure), Is.True);
+            Assert.That(failure, Is.EqualTo(PathFailureReason.NoGlobalRoute));
+        }
+
+        [Test]
+        public void SemanticPoliciesSelectDifferentPolygonCorridors()
+        {
+            SemanticRegistryAsset registry = Create<SemanticRegistryAsset>();
+            SemanticId road = registry.Add("Road");
+            NavigationWorldAsset source = Create<NavigationWorldAsset>();
+            source.SetSemanticRegistry(registry);
+            NavigationAreaAsset area = Create<NavigationAreaAsset>();
+            source.AddArea(area);
+            NavigationPolygonRecord start = area.AddPolygon(Rectangle(0f, 0f, 1f, 2f));
+            NavigationPolygonRecord upperRoad = area.AddPolygon(Rectangle(1f, 1f, 2f, 2f));
+            NavigationPolygonRecord lower = area.AddPolygon(Rectangle(1f, 0f, 2f, 1f));
+            NavigationPolygonRecord goal = area.AddPolygon(Rectangle(2f, 0f, 3f, 2f));
+            var roadMask = new SemanticMask(registry.SlotCapacity);
+            roadMask.Set(0);
+            upperRoad.SetSemantics(roadMask);
+            NavigationBakeAsset bake = Bake(source);
+
+            CompiledTraversalPolicy cautious = Compile(
+                new TraversalPolicyBuilder(registry).SetCost(road, 8d, 0d),
+                bake);
+            CompiledTraversalPolicy reckless = Compile(
+                new TraversalPolicyBuilder(registry).SetCost(road, 0.1d, 0d),
+                bake);
+            var startLocation = new NavigationLocation(area.Id, new Vector3(0.5f, 0f, 1f));
+            var goalLocation = new NavigationLocation(area.Id, new Vector3(2.5f, 0f, 1f));
+
+            using var world = new NavigationWorld(bake);
+            PathRequestHandle cautiousHandle = world.Submit(new PathQuery(startLocation, goalLocation, cautious));
+            PathRequestHandle recklessHandle = world.Submit(new PathQuery(startLocation, goalLocation, reckless));
+            Complete(world, cautiousHandle, recklessHandle);
+
+            Assert.That(world.TryGetPath(cautiousHandle, out NavigationPathView cautiousPath), Is.True);
+            Assert.That(world.TryGetPath(recklessHandle, out NavigationPathView recklessPath), Is.True);
+            Assert.That(Contains(cautiousPath, lower.Id), Is.True);
+            Assert.That(Contains(cautiousPath, upperRoad.Id), Is.False);
+            Assert.That(Contains(recklessPath, upperRoad.Id), Is.True);
+            Assert.That(Contains(recklessPath, lower.Id), Is.False);
+            Assert.That(cautiousPath.GetPolygon(0), Is.EqualTo(start.Id));
+            Assert.That(cautiousPath.GetPolygon(cautiousPath.PolygonCount - 1), Is.EqualTo(goal.Id));
+        }
+
+        [Test]
+        public void CancellationWinsBeforePublicationAndCallbackRunsExactlyOnce()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            int callbacks = 0;
+            PathRequestHandle handle = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA),
+                _ => callbacks++);
+
+            world.Tick(1);
+            Assert.That(world.Cancel(handle), Is.True);
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Cancelled));
+            Assert.That(callbacks, Is.Zero);
+            world.Tick(64);
+            world.Tick(64);
+
+            Assert.That(callbacks, Is.EqualTo(1));
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Cancelled));
+            Assert.That(world.TryGetPath(handle, out _), Is.False);
+        }
+
+        [Test]
+        public void AreaMutationDuringARequestPublishesStaleInsteadOfSuccess()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            PathRequestHandle handle = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaA));
+            world.Tick(1);
+
+            Assert.That(world.MarkAreaDirty(fixture.AreaA.Id), Is.True);
+            world.Tick(1);
+            world.Tick(1);
+            world.Tick(0);
+
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Stale));
+            Assert.That(world.TryGetPath(handle, out _), Is.False);
+        }
+
+        [Test]
+        public void UnrelatedAreaRevisionDoesNotInvalidateCompletedLocalPath()
+        {
+            TestWorld fixture = CreateThreeAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            PathRequestHandle handle = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaA));
+            Complete(world, handle);
+            Assert.That(world.TryGetPath(handle, out NavigationPathView path), Is.True);
+
+            Assert.That(world.MarkAreaDirty(fixture.AreaC.Id), Is.True);
+            world.Tick(0);
+
+            Assert.That(world.IsCurrent(path), Is.True);
+            Assert.That(world.GetAreaRevision(fixture.AreaA.Id), Is.EqualTo(path.GetRevision(0).Revision));
+        }
+
+        [Test]
+        public void DisablingPortalAdvancesOnlyEndpointAreasAndTopology()
+        {
+            TestWorld fixture = CreateThreeAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            ulong areaA = world.GetAreaRevision(fixture.AreaA.Id);
+            ulong areaB = world.GetAreaRevision(fixture.AreaB.Id);
+            ulong areaC = world.GetAreaRevision(fixture.AreaC.Id);
+            ulong topology = world.TopologyRevision;
+
+            Assert.That(world.SetPortalEnabled(fixture.PortalAB.Id, false), Is.True);
+            world.Tick(0);
+
+            Assert.That(world.GetAreaRevision(fixture.AreaA.Id), Is.GreaterThan(areaA));
+            Assert.That(world.GetAreaRevision(fixture.AreaB.Id), Is.GreaterThan(areaB));
+            Assert.That(world.GetAreaRevision(fixture.AreaC.Id), Is.EqualTo(areaC));
+            Assert.That(world.TopologyRevision, Is.GreaterThan(topology));
+
+            PathRequestHandle handle = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaC));
+            Complete(world, handle);
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Failed));
+        }
+
+        [Test]
+        public void WeightedQueuesServeLowPriorityWithoutBreakingPriorityFifo()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            var callbackOrder = new List<PathRequestHandle>();
+            PathRequestHandle highFirst = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA, PathPriority.High), callbackOrder.Add);
+            PathRequestHandle highSecond = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA, PathPriority.High), callbackOrder.Add);
+            PathRequestHandle low = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA, PathPriority.Low), callbackOrder.Add);
+
+            world.Tick(3);
+            Assert.That(world.GetStatus(low), Is.Not.EqualTo(PathRequestStatus.Queued));
+            Complete(world, highFirst, highSecond, low);
+
+            Assert.That(callbackOrder.IndexOf(highFirst), Is.LessThan(callbackOrder.IndexOf(highSecond)));
+            Assert.That(callbackOrder, Does.Contain(low));
+        }
+
+        [Test]
+        public void StaleQueueEntryCannotAdvanceAReusedSlotAtItsFormerPriority()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            PathRequestHandle cancelled = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA, PathPriority.High));
+
+            Assert.That(world.Cancel(cancelled), Is.True);
+            world.Tick(0);
+            Assert.That(world.Release(cancelled), Is.True);
+
+            PathRequestHandle reused = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA, PathPriority.Low));
+            PathRequestHandle high = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA, PathPriority.High));
+            Assert.That(reused.Slot, Is.EqualTo(cancelled.Slot));
+            Assert.That(reused.Generation, Is.Not.EqualTo(cancelled.Generation));
+
+            world.Tick(1);
+
+            Assert.That(world.GetStatus(high), Is.EqualTo(PathRequestStatus.RunningGlobal));
+            Assert.That(world.GetStatus(reused), Is.EqualTo(PathRequestStatus.Queued));
+        }
+
+        [Test]
+        public void ReleasingResultInvalidatesViewAndOldHandleGeneration()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            PathRequestHandle first = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaA));
+            Complete(world, first);
+            Assert.That(world.TryGetPath(first, out NavigationPathView view), Is.True);
+            NavigationPath copy = view.ToManagedCopy();
+
+            Assert.That(world.Release(first), Is.True);
+            Assert.That(view.IsValid, Is.False);
+            PathRequestHandle second = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaA));
+
+            Assert.That(second.Slot, Is.EqualTo(first.Slot));
+            Assert.That(second.Generation, Is.Not.EqualTo(first.Generation));
+            Assert.That(world.GetStatus(first), Is.EqualTo(PathRequestStatus.Invalid));
+            Assert.That(world.IsCurrent(copy), Is.True);
+        }
+
+        [Test]
+        public void ResolverReportsAmbiguousOverlappingAreasUnlessHinted()
+        {
+            TestWorld fixture = CreateThreeAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            Double3 point = new Double3(0.5d, 0d, 0.5d);
+
+            Assert.That(world.Resolve(point, fixture.Policy, out _), Is.EqualTo(LocationResolveStatus.Ambiguous));
+            Assert.That(
+                world.Resolve(point, fixture.AreaB.Id, fixture.Policy, out NavigationLocation location),
+                Is.EqualTo(LocationResolveStatus.Found));
+            Assert.That(location.AreaId, Is.EqualTo(fixture.AreaB.Id));
+        }
+
+        [Test]
+        public void BidirectionalPortalPublishesForwardAndInverseRigidTransforms()
+        {
+            var transform = new PortalTransform(
+                new Double3(1_000.25d, -32.5d, 4_000.75d),
+                Quaternion.Euler(13f, 91f, -7f));
+            TestWorld fixture = CreateBidirectionalWorld(transform);
+            using var world = new NavigationWorld(fixture.Bake);
+            PathRequestHandle forward = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaB));
+            PathRequestHandle reverse = world.Submit(Query(fixture, fixture.AreaB, fixture.AreaA));
+
+            Complete(world, forward, reverse);
+
+            Assert.That(world.TryGetPath(forward, out NavigationPathView forwardPath), Is.True);
+            Assert.That(world.TryGetPath(reverse, out NavigationPathView reversePath), Is.True);
+            NavigationPortalTransition forwardTransition = forwardPath.GetPortalTransition(0);
+            NavigationPortalTransition reverseTransition = reversePath.GetPortalTransition(0);
+            Assert.That(forwardTransition.Entry.AreaId, Is.EqualTo(fixture.AreaA.Id));
+            Assert.That(forwardTransition.Exit.AreaId, Is.EqualTo(fixture.AreaB.Id));
+            Assert.That(reverseTransition.Entry.AreaId, Is.EqualTo(fixture.AreaB.Id));
+            Assert.That(reverseTransition.Exit.AreaId, Is.EqualTo(fixture.AreaA.Id));
+
+            var probe = new Double3(17.25d, 4d, -8.5d);
+            AssertDouble3(
+                forwardTransition.EntryToExit.TransformPosition(probe),
+                transform.TransformPosition(probe));
+            AssertDouble3(
+                reverseTransition.EntryToExit.TransformPosition(probe),
+                transform.Inverse.TransformPosition(probe));
+        }
+
+        [Test]
+        public void EqualCostGlobalRoutesChooseLowestStablePortalIdAndAccumulateExactSegmentCosts()
+        {
+            TestWorld fixture = CreateTiedThreeAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            var handles = new PathRequestHandle[8];
+            var query = new PathQuery(
+                new NavigationLocation(fixture.AreaA.Id, new Vector3(0.25f, 0f, 0.5f)),
+                new NavigationLocation(fixture.AreaC.Id, new Vector3(0.75f, 0f, 0.5f)),
+                fixture.Policy);
+            for (int index = 0; index < handles.Length; index++)
+            {
+                handles[index] = world.Submit(query);
+            }
+
+            Complete(world, handles);
+
+            for (int request = 0; request < handles.Length; request++)
+            {
+                Assert.That(world.TryGetPath(handles[request], out NavigationPathView path), Is.True);
+                Assert.That(path.GetPortalTransition(0).PortalId, Is.EqualTo(fixture.PortalAB.Id));
+                Assert.That(path.GetPortalTransition(1).PortalId, Is.EqualTo(fixture.PortalBC.Id));
+                Assert.That(path.TotalCost, Is.EqualTo(7.5d).Within(1e-9d));
+
+                double accumulated = 0d;
+                for (int index = 0; index < path.AreaCount; index++)
+                {
+                    accumulated += path.GetArea(index).Cost;
+                }
+
+                for (int index = 0; index < path.PortalTransitionCount; index++)
+                {
+                    accumulated += path.GetPortalTransition(index).Cost;
+                }
+
+                Assert.That(path.TotalCost, Is.EqualTo(accumulated).Within(1e-9d));
+            }
+        }
+
+        [Test]
+        public void SuccessfulCallbackIsDeferredAndDeliveredExactlyOnce()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            int callbackCount = 0;
+            PathRequestStatus callbackStatus = PathRequestStatus.Invalid;
+            PathRequestHandle callbackHandle = default;
+            PathRequestHandle handle = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA),
+                completed =>
+                {
+                    callbackCount++;
+                    callbackHandle = completed;
+                    callbackStatus = world.GetStatus(completed);
+                });
+
+            world.Tick(64);
+
+            Assert.That(callbackCount, Is.Zero);
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.RunningLocal));
+            world.Tick(0);
+            Assert.That(callbackCount, Is.EqualTo(1));
+            Assert.That(callbackHandle, Is.EqualTo(handle));
+            Assert.That(callbackStatus, Is.EqualTo(PathRequestStatus.Completed));
+
+            world.Tick(64);
+            world.Tick(0);
+            Assert.That(callbackCount, Is.EqualTo(1));
+        }
+
+        private TestWorld CreateSingleAreaWorld()
+        {
+            SemanticRegistryAsset registry = Create<SemanticRegistryAsset>();
+            NavigationWorldAsset source = Create<NavigationWorldAsset>();
+            source.SetSemanticRegistry(registry);
+            NavigationAreaAsset area = Create<NavigationAreaAsset>();
+            area.AddPolygon(Rectangle(0f, 0f, 1f, 1f));
+            source.AddArea(area);
+            NavigationBakeAsset bake = Bake(source);
+            return new TestWorld
+            {
+                Registry = registry,
+                Source = source,
+                Bake = bake,
+                Policy = Compile(new TraversalPolicyBuilder(registry), bake),
+                AreaA = area
+            };
+        }
+
+        private TestWorld CreateThreeAreaWorld()
+        {
+            SemanticRegistryAsset registry = Create<SemanticRegistryAsset>();
+            NavigationWorldAsset source = Create<NavigationWorldAsset>();
+            source.SetSemanticRegistry(registry);
+            NavigationAreaAsset areaA = AddSinglePolygonArea(source);
+            NavigationAreaAsset areaB = AddSinglePolygonArea(source);
+            NavigationAreaAsset areaC = AddSinglePolygonArea(source);
+            NavigationPolygonRecord polygonA = areaA.Polygons[0];
+            NavigationPolygonRecord polygonB = areaB.Polygons[0];
+            NavigationPolygonRecord polygonC = areaC.Polygons[0];
+            NavigationPortalRecord portalAB = source.AddPortal(
+                Span(areaA, polygonA, 2),
+                Span(areaB, polygonB, 2),
+                PortalDirection.SourceToDestination,
+                1d,
+                PortalTransform.Identity);
+            NavigationPortalRecord portalBC = source.AddPortal(
+                Span(areaB, polygonB, 0),
+                Span(areaC, polygonC, 0),
+                PortalDirection.SourceToDestination,
+                1d,
+                PortalTransform.Identity);
+            NavigationBakeAsset bake = Bake(source);
+            return new TestWorld
+            {
+                Registry = registry,
+                Source = source,
+                Bake = bake,
+                Policy = Compile(new TraversalPolicyBuilder(registry), bake),
+                AreaA = areaA,
+                AreaB = areaB,
+                AreaC = areaC,
+                PortalAB = portalAB,
+                PortalBC = portalBC
+            };
+        }
+
+        private TestWorld CreateBidirectionalWorld(PortalTransform transform)
+        {
+            SemanticRegistryAsset registry = Create<SemanticRegistryAsset>();
+            NavigationWorldAsset source = Create<NavigationWorldAsset>();
+            source.SetSemanticRegistry(registry);
+            NavigationAreaAsset areaA = AddSinglePolygonArea(source);
+            NavigationAreaAsset areaB = AddSinglePolygonArea(source);
+            areaB.SetFrame(new AreaFrame(transform.Translation, transform.Rotation));
+            NavigationPortalRecord portal = source.AddPortal(
+                Span(areaA, areaA.Polygons[0], 2),
+                Span(areaB, areaB.Polygons[0], 2),
+                PortalDirection.Bidirectional,
+                1d,
+                transform);
+            NavigationBakeAsset bake = Bake(source);
+            return new TestWorld
+            {
+                Registry = registry,
+                Source = source,
+                Bake = bake,
+                Policy = Compile(new TraversalPolicyBuilder(registry), bake),
+                AreaA = areaA,
+                AreaB = areaB,
+                PortalAB = portal
+            };
+        }
+
+        private TestWorld CreateTiedThreeAreaWorld()
+        {
+            SemanticRegistryAsset registry = Create<SemanticRegistryAsset>();
+            NavigationWorldAsset source = Create<NavigationWorldAsset>();
+            source.SetSemanticRegistry(registry);
+            NavigationAreaAsset areaA = AddSinglePolygonArea(source);
+            NavigationAreaAsset areaB = AddSinglePolygonArea(source);
+            NavigationAreaAsset areaC = AddSinglePolygonArea(source);
+            var doorwayTransform = new PortalTransform(
+                new Double3(-1d, 0d, 0d),
+                Quaternion.identity);
+            NavigationPortalRecord firstAB = source.AddPortal(
+                Span(areaA, areaA.Polygons[0], 2),
+                Span(areaB, areaB.Polygons[0], 0),
+                PortalDirection.SourceToDestination,
+                2d,
+                doorwayTransform);
+            NavigationPortalRecord secondAB = source.AddPortal(
+                Span(areaA, areaA.Polygons[0], 2),
+                Span(areaB, areaB.Polygons[0], 0),
+                PortalDirection.SourceToDestination,
+                2d,
+                doorwayTransform);
+            NavigationPortalRecord portalBC = source.AddPortal(
+                Span(areaB, areaB.Polygons[0], 2),
+                Span(areaC, areaC.Polygons[0], 0),
+                PortalDirection.SourceToDestination,
+                3d,
+                doorwayTransform);
+            NavigationBakeAsset bake = Bake(source);
+            return new TestWorld
+            {
+                Registry = registry,
+                Source = source,
+                Bake = bake,
+                Policy = Compile(new TraversalPolicyBuilder(registry), bake),
+                AreaA = areaA,
+                AreaB = areaB,
+                AreaC = areaC,
+                PortalAB = firstAB.Id.CompareTo(secondAB.Id) <= 0 ? firstAB : secondAB,
+                PortalBC = portalBC
+            };
+        }
+
+        private NavigationAreaAsset AddSinglePolygonArea(NavigationWorldAsset world)
+        {
+            NavigationAreaAsset area = Create<NavigationAreaAsset>();
+            area.AddPolygon(Rectangle(0f, 0f, 1f, 1f));
+            world.AddArea(area);
+            return area;
+        }
+
+        private NavigationBakeAsset Bake(NavigationWorldAsset source)
+        {
+            NavigationBakeAsset bake = Create<NavigationBakeAsset>();
+            NavigationBakeResult result = NavigationBaker.Bake(source, bake);
+            Assert.That(result.Succeeded, Is.True, FormatIssues(result));
+            return bake;
+        }
+
+        private static CompiledTraversalPolicy Compile(
+            TraversalPolicyBuilder builder,
+            NavigationBakeAsset bake)
+        {
+            Assert.That(builder.TryCompile(bake, out CompiledTraversalPolicy policy, out string error),
+                Is.True, error);
+            return policy;
+        }
+
+        private static PathQuery Query(
+            TestWorld fixture,
+            NavigationAreaAsset start,
+            NavigationAreaAsset goal,
+            PathPriority priority = PathPriority.Normal)
+        {
+            return new PathQuery(
+                new NavigationLocation(start.Id, new Vector3(0.25f, 0f, 0.25f)),
+                new NavigationLocation(goal.Id, new Vector3(0.75f, 0f, 0.75f)),
+                fixture.Policy,
+                priority);
+        }
+
+        private static void Complete(NavigationWorld world, params PathRequestHandle[] handles)
+        {
+            for (int tick = 0; tick < 32; tick++)
+            {
+                world.Tick(64);
+                bool allTerminal = true;
+                for (int index = 0; index < handles.Length; index++)
+                {
+                    PathRequestStatus status = world.GetStatus(handles[index]);
+                    allTerminal &= status == PathRequestStatus.Completed ||
+                                   status == PathRequestStatus.Failed ||
+                                   status == PathRequestStatus.Cancelled ||
+                                   status == PathRequestStatus.Stale;
+                }
+
+                if (allTerminal)
+                {
+                    return;
+                }
+            }
+
+            Assert.Fail("Requests did not reach terminal states within the test budget.");
+        }
+
+        private T Create<T>() where T : ScriptableObject
+        {
+            T value = ScriptableObject.CreateInstance<T>();
+            _assets.Add(value);
+            return value;
+        }
+
+        private static Vector3[] Rectangle(float minX, float minZ, float maxX, float maxZ)
+        {
+            return new[]
+            {
+                new Vector3(minX, 0f, minZ),
+                new Vector3(minX, 0f, maxZ),
+                new Vector3(maxX, 0f, maxZ),
+                new Vector3(maxX, 0f, minZ)
+            };
+        }
+
+        private static PortalEntrySpan Span(
+            NavigationAreaAsset area,
+            NavigationPolygonRecord polygon,
+            int edge)
+        {
+            NavigationVertexRecord start = polygon.Vertices[edge];
+            NavigationVertexRecord end = polygon.Vertices[(edge + 1) % polygon.Vertices.Count];
+            return new PortalEntrySpan(
+                area.Id,
+                polygon.Id,
+                start.OutgoingEdgeId,
+                start.Position,
+                end.Position);
+        }
+
+        private static bool Contains(NavigationPathView path, PolygonId id)
+        {
+            for (int index = 0; index < path.PolygonCount; index++)
+            {
+                if (path.GetPolygon(index) == id)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
+        private static void AssertDouble3(Double3 actual, Double3 expected)
+        {
+            Assert.That(actual.X, Is.EqualTo(expected.X).Within(1e-8d));
+            Assert.That(actual.Y, Is.EqualTo(expected.Y).Within(1e-8d));
+            Assert.That(actual.Z, Is.EqualTo(expected.Z).Within(1e-8d));
+        }
+
+        private static string FormatIssues(NavigationBakeResult result)
+        {
+            var lines = new List<string>();
+            for (int index = 0; index < result.Issues.Count; index++)
+            {
+                NavigationValidationIssue issue = result.Issues[index];
+                lines.Add($"{issue.Severity}: {issue.Code}: {issue.Message}");
+            }
+
+            return string.Join(Environment.NewLine, lines);
+        }
+
+        private sealed class TestWorld
+        {
+            internal SemanticRegistryAsset Registry;
+            internal NavigationWorldAsset Source;
+            internal NavigationBakeAsset Bake;
+            internal CompiledTraversalPolicy Policy;
+            internal NavigationAreaAsset AreaA;
+            internal NavigationAreaAsset AreaB;
+            internal NavigationAreaAsset AreaC;
+            internal NavigationPortalRecord PortalAB;
+            internal NavigationPortalRecord PortalBC;
+        }
+    }
+}
