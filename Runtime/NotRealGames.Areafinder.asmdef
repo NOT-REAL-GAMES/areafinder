@@ -1,7 +1,10 @@
 {
   "name": "NotRealGames.Areafinder",
   "rootNamespace": "NotRealGames.Areafinder",
-  "references": [],
+  "references": [
+    "Unity.Burst",
+    "Unity.Collections"
+  ],
   "includePlatforms": [],
   "excludePlatforms": [],
   "allowUnsafeCode": false,

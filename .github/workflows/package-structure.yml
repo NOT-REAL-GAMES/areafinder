@@ -1,0 +1,17 @@
+name: Package structure
+
+on:
+  push:
+  pull_request:
+
+permissions:
+  contents: read
+
+jobs:
+  validate:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v7
+      - name: Validate package structure
+        shell: pwsh
+        run: ./Tools~/Test-PackageStructure.ps1

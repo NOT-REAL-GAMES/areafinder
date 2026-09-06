@@ -1,0 +1,16 @@
+{
+  "name": "NotRealGames.Areafinder.Samples.RoomToRoom",
+  "rootNamespace": "NotRealGames.Areafinder.Samples.RoomToRoom",
+  "references": [
+    "NotRealGames.Areafinder"
+  ],
+  "includePlatforms": [],
+  "excludePlatforms": [],
+  "allowUnsafeCode": false,
+  "overrideReferences": false,
+  "precompiledReferences": [],
+  "autoReferenced": true,
+  "defineConstraints": [],
+  "versionDefines": [],
+  "noEngineReferences": false
+}

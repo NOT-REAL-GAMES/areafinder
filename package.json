@@ -2,8 +2,9 @@
   "name": "com.notrealgames.areafinder",
   "version": "0.1.0",
   "displayName": "Areafinder",
-  "description": "A foundation for custom navigation and pathfinding in Unity.",
-  "unity": "6000.0",
+  "description": "An early-development package for authored polygon navigation and pathfinding in Unity.",
+  "unity": "6000.7",
+  "unityRelease": "0a6",
   "author": {
     "name": "Not Real Games"
   },
@@ -13,5 +14,15 @@
     "pathfinding",
     "ai"
   ],
-  "dependencies": {}
+  "dependencies": {
+    "com.unity.burst": "1.8.25",
+    "com.unity.collections": "6.7.0"
+  },
+  "samples": [
+    {
+      "displayName": "Room to Room",
+      "description": "Two authored polygon rooms connected by a Portal, with an asynchronous steering-path preview.",
+      "path": "Samples~/RoomToRoom"
+    }
+  ]
 }
