@@ -135,6 +135,7 @@ namespace NotRealGames.Areafinder
         public SemanticRegistryAsset SemanticRegistry => _semanticRegistry;
         public AdjacencyInferenceSettings InferenceSettings =>
             _inferenceSettings.IsValid ? _inferenceSettings : AdjacencyInferenceSettings.Default;
+        internal AdjacencyInferenceSettings RawInferenceSettings => _inferenceSettings;
         public IReadOnlyList<NavigationAreaAsset> Areas => _areas;
         public IReadOnlyList<NavigationPortalRecord> Portals => _portals;
         public IReadOnlyList<TraversalPolicyAsset> Policies => _policies;

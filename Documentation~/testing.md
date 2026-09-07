@@ -1,8 +1,8 @@
 # Testing and acceptance
 
-Tests are added with each implementation milestone. The current suite covers stable IDs and large-coordinate transforms; semantic boundaries, tombstones, restoration, and compaction; core polygon validation and adjacency cases; deterministic baking; policy eligibility/cost; local and three-Area routing; rigid bidirectional Portals; lifecycle, fairness, cancellation, stale results, revisions, release, and resolver ambiguity; plus editor settings and compaction smoke coverage.
+Tests are added with each implementation milestone. The 0.2 suite covers stable IDs and large-coordinate transforms; semantic boundaries, tombstones, restoration, and compaction; all 41 emitted validation codes and every configured tolerance boundary; deterministic AssetDatabase/domain-reload persistence and baking; policy eligibility/cost; local and three-Area routing; rigid bidirectional Portals; the complete current request lifecycle; direct cache behavior; managed/Burst parity; revisions and mutation; Undo refresh; editor settings; and sample setup.
 
-The lists below remain the full acceptance target. Serialization/domain-reload matrices, every geometry tolerance edge, prototype parity, concurrent Burst batches, player AOT, warmed end-to-end allocation checks, and manual HORDE acceptance are not yet complete.
+Version 0.2 also builds and launches real Windows Mono/Burst and IL2CPP/Burst players and records repeatable route baselines. Concurrent job batches and snapshot ownership, full-route zero-allocation work, A*/optimistic global refinement, schema changes, broad editor UX, HORDE dogfooding, and post-1.0 backends remain deferred.
 
 ## Run package tests
 
@@ -19,7 +19,7 @@ Use Unity `6000.7.0a6`. Install Areafinder into a disposable host project throug
 }
 ```
 
-Run both `NotRealGames.Areafinder.Editor.Tests` in Edit Mode and `NotRealGames.Areafinder.Tests` in Play Mode. Disposable hosts keep Unity-generated `Library`, `Logs`, `Temp`, and result artifacts outside the package repository.
+Run both `NotRealGames.Areafinder.Editor.Tests` in Edit Mode and `NotRealGames.Areafinder.Tests` in Play Mode. `Tools~/Run-UnityTests.ps1` creates the disposable host, enforces discovery floors of 9 Edit Mode and 178 Play Mode cases, and validates its JSON benchmark report. Disposable hosts keep Unity-generated `Library`, `Logs`, `Temp`, and result artifacts outside the package repository.
 
 ## Authoring and serialization
 
@@ -46,12 +46,25 @@ Run both `NotRealGames.Areafinder.Editor.Tests` in Edit Mode and `NotRealGames.A
 - Cancel queued and running requests and destroy an associated owner; no successful callback may arrive afterward.
 - Change a dependency during a running request and require `Stale` rather than silently publishing an authoritative result.
 
-## Jobs, Burst, and allocation
+## Jobs, Burst, players, and allocation
 
-The multi-polygon local kernel now runs as a Burst job with persistent native input and scratch arrays after the managed behavior suite established its contract. Managed-versus-Burst parity expansion, player AOT compilation, truly concurrent batches, and zero managed allocations in the warmed scheduler and full request/result path remain required.
+The multi-polygon local kernel runs as a Burst job with persistent native input and scratch arrays. Managed-reference parity covers same-polygon, multi-polygon, unreachable, semantic-policy, runtime-mutation, and equal-cost-tie cases. After 32 warmups, 1,024 idle `Tick(0)` calls must allocate zero bytes according to `GC.GetAllocatedBytesForCurrentThread`. Full complete/retrieve/release cycles are recorded as baselines, not release thresholds and not zero-allocation guarantees.
 
-The deterministic [semantic mask layout benchmark and decision](semantic-mask-layout.md) covers fixed-stride, trimmed pooled, and interned storage at 1, 2, 8, and 16 words across 256, 4,096, and 65,536 polygons. Schema 1 retains fixed stride because no alternative passes the memory and access gate across all distributions. A Unity player/Burst rerun on real authored bakes is still required before freezing the 1.0 schema.
+`Tools~/Run-UnityAotSmoke.ps1` creates a valid two-Area fixture, compiles a policy, builds both Windows backends, finds each native Burst artifact, launches each executable with a bounded timeout, and requires a backend-specific route-success marker. Missing IL2CPP support is a hard failure. `Tools~/Run-RoomToRoomSmoke.ps1` independently imports the package sample, runs its setup command, and executes its route.
 
-## Manual 1.0 acceptance
+The [route performance baseline](performance-baseline.md) records seven samples of 128 complete/retrieve/release cycles on a 16×16 same-Area grid and a three-Area/two-Portal fixture with 8×8 grids. The separate deterministic [semantic mask layout benchmark and decision](semantic-mask-layout.md) covers fixed-stride, trimmed pooled, and interned storage. Bake schema 1 retains fixed stride.
+
+The 0.2 local gate is:
+
+```powershell
+./Tools~/Test-PackageStructure.ps1
+./Tools~/Run-UnityTests.ps1
+./Tools~/Run-RoomToRoomSmoke.ps1
+./Tools~/Run-UnityAotSmoke.ps1 -Backends Mono,IL2CPP
+```
+
+GitHub Actions intentionally runs only the static package-structure check. A public release additionally requires that hosted check to start and pass.
+
+## Deferred manual 1.0 acceptance
 
 In HORDE, author two rooms from scratch, inspect inferred and overridden adjacency, attach an authored Portal, assign policies that choose different routes, bake, issue concurrent Rigidbody-enemy requests, cancel and stale requests safely, and traverse using steering guidance without exact waypoint arrival. Run the final automated host without AI Navigation and confirm the package source contains no NavMesh or High Precision dependency.

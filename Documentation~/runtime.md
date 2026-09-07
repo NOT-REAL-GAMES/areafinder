@@ -1,16 +1,19 @@
 # Runtime and pathfinding
 
-This document separates current 0.1 behavior from remaining 1.0 requirements. Names already present are usable for development, but none are compatibility-stable before 1.0.
+This document separates current 0.2 behavior from remaining 1.0 requirements. Names already present are usable for development, but none are compatibility-stable before 1.0.
 
-## Current 0.1 implementation
+## Current 0.2 implementation
 
 - A disposable, non-singleton `NavigationWorld` loads a valid bake and exposes submission, batch submission, status, cancellation, release, ticking, resolution, and currency checks.
 - Policies compile from assets or a programmatic builder into flat mask predicates and cost rules.
 - Global routing follows authored Areas and Portals. Local routing returns polygon corridors, crossing spans, and optional funnel-derived steering targets.
 - Multi-polygon local searches schedule and complete a Burst `IJob` over persistent native arrays and reusable native scratch. The surrounding global solver, result construction, scheduler, and callback publication remain managed and cooperative.
 - Requests advance through explicit queued/global/local states, then publish a terminal result on a later tick. Per-Area revisions and bounded local Portal-pair caches support targeted invalidation.
+- Both batch overloads, every lifecycle state, handle reuse, all output-flag combinations, weighted fairness, cancellation timing, callback reentrancy/exception isolation, result lifetime, and host-owned request cleanup are characterized.
+- Direct cache tests cover hits, unreachable entries, zero and bounded capacity, deterministic LRU behavior, policy/revision separation, and unrelated-Area preservation.
+- Managed reference results match the Burst kernel for same-polygon, multi-polygon, unreachable, semantic-policy, runtime-mutation, and equal-cost-tie cases.
 
-Still required before 1.0 are a profiled concurrent-job pipeline, a refined optimistic global search if profiling justifies it, exhaustive prototype parity, warmed zero-allocation proof for the complete request path, Burst/AOT player validation, and API/schema stabilization.
+Still required before 1.0 are a profiled concurrent-job pipeline with explicit snapshot ownership, a refined optimistic global search if profiling justifies it, broader dogfooding, zero-allocation work for the complete request path, and API/schema stabilization. Version 0.2 deliberately adds no navigation features and makes no full-route allocation guarantee.
 
 ## Runtime ownership
 
@@ -53,7 +56,7 @@ The scheduler uses a cooperative main-thread work budget. Low, Normal, and High 
 
 Terminal callbacks are deferred to a later main-thread tick and run at most once. Cancellation wins until publication. The host can associate a request with a Unity owner, cancel it when that owner disappears, and suppress its callback.
 
-The first local kernel has moved behind Jobs and Burst without changing request semantics. Concurrent batches, job-safe snapshots, player AOT verification, and end-to-end warmed allocation checks remain later gates.
+The first local kernel has moved behind Jobs and Burst without changing request semantics. Version 0.2 builds and launches real Windows Mono/Burst and IL2CPP/Burst routes. Concurrent batches, job-safe snapshots, and end-to-end zero-allocation work remain later gates.
 
 ## Revisions, caching, and mutation
 

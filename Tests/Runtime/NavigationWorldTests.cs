@@ -1,7 +1,10 @@
 using System;
 using System.Collections.Generic;
+using System.Reflection;
+using System.Text.RegularExpressions;
 using NUnit.Framework;
 using UnityEngine;
+using UnityEngine.TestTools;
 
 namespace NotRealGames.Areafinder.Tests
 {
@@ -381,6 +384,270 @@ namespace NotRealGames.Areafinder.Tests
             Assert.That(callbackCount, Is.EqualTo(1));
         }
 
+        [Test]
+        public void SubmitBatchOverloadsPreserveOrderAndValidateDestinations()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            PathQuery[] queries =
+            {
+                Query(fixture, fixture.AreaA, fixture.AreaA, PathPriority.Low),
+                Query(fixture, fixture.AreaA, fixture.AreaA, PathPriority.Normal),
+                Query(fixture, fixture.AreaA, fixture.AreaA, PathPriority.High)
+            };
+
+            PathRequestHandle[] allocated = world.SubmitBatch(queries);
+            var destination = new PathRequestHandle[queries.Length + 1];
+            world.SubmitBatch(queries, destination);
+
+            for (int index = 0; index < queries.Length; index++)
+            {
+                Assert.That(allocated[index].IsValid, Is.True);
+                Assert.That(destination[index].IsValid, Is.True);
+                Assert.That(allocated[index], Is.Not.EqualTo(destination[index]));
+                Assert.That(world.GetStatus(allocated[index]), Is.EqualTo(PathRequestStatus.Queued));
+                Assert.That(world.GetStatus(destination[index]), Is.EqualTo(PathRequestStatus.Queued));
+            }
+
+            Assert.That(destination[queries.Length], Is.EqualTo(default(PathRequestHandle)));
+            Assert.Throws<ArgumentNullException>(
+                () => world.SubmitBatch((IReadOnlyList<PathQuery>)null));
+            Assert.Throws<ArgumentNullException>(
+                () => world.SubmitBatch((IReadOnlyList<PathQuery>)null, destination));
+            Assert.Throws<ArgumentException>(() => world.SubmitBatch(queries, null));
+            Assert.Throws<ArgumentException>(
+                () => world.SubmitBatch(queries, new PathRequestHandle[queries.Length - 1]));
+
+            Complete(world, allocated);
+            Complete(world, destination[0], destination[1], destination[2]);
+            for (int index = 0; index < queries.Length; index++)
+            {
+                Assert.That(world.GetStatus(allocated[index]), Is.EqualTo(PathRequestStatus.Completed));
+                Assert.That(world.GetStatus(destination[index]), Is.EqualTo(PathRequestStatus.Completed));
+            }
+        }
+
+        [Test]
+        public void InvalidAndReleasedHandlesHaveNoObservableRequestState()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+
+            Assert.That(world.GetStatus(default), Is.EqualTo(PathRequestStatus.Invalid));
+            Assert.That(world.TryGetFailure(default, out PathFailureReason emptyFailure), Is.False);
+            Assert.That(emptyFailure, Is.EqualTo(PathFailureReason.None));
+            Assert.That(world.TryGetPath(default, out _), Is.False);
+            Assert.That(world.Cancel(default), Is.False);
+            Assert.That(world.Release(default), Is.False);
+
+            PathRequestHandle invalid = world.Submit(default);
+            Assert.That(world.GetStatus(invalid), Is.EqualTo(PathRequestStatus.Queued));
+            Assert.That(world.Release(invalid), Is.False);
+            world.Tick(0);
+            Assert.That(world.GetStatus(invalid), Is.EqualTo(PathRequestStatus.Failed));
+            Assert.That(world.TryGetFailure(invalid, out PathFailureReason reason), Is.True);
+            Assert.That(reason, Is.EqualTo(PathFailureReason.InvalidRequest));
+            Assert.That(world.Release(invalid), Is.True);
+
+            PathRequestHandle reused = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaA));
+            Assert.That(reused.Slot, Is.EqualTo(invalid.Slot));
+            Assert.That(reused.Generation, Is.Not.EqualTo(invalid.Generation));
+            Assert.That(world.GetStatus(invalid), Is.EqualTo(PathRequestStatus.Invalid));
+            Assert.That(world.Cancel(invalid), Is.False);
+            Assert.That(world.Release(invalid), Is.False);
+        }
+
+        [TestCase(PathOutputFlags.None, 0, 0)]
+        [TestCase(PathOutputFlags.PolygonCorridor, 2, 0)]
+        [TestCase(PathOutputFlags.SteeringTargets, 0, 1)]
+        [TestCase(PathOutputFlags.Default, 2, 1)]
+        public void EveryOutputFlagCombinationReturnsOnlyRequestedGuidance(
+            PathOutputFlags output,
+            int expectedPolygons,
+            int expectedSteeringTargets)
+        {
+            TestWorld fixture = CreateTwoPolygonWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            var query = new PathQuery(
+                new NavigationLocation(fixture.AreaA.Id, new Vector3(0.25f, 0f, 0.5f)),
+                new NavigationLocation(fixture.AreaA.Id, new Vector3(1.75f, 0f, 0.5f)),
+                fixture.Policy,
+                PathPriority.Normal,
+                output);
+
+            PathRequestHandle handle = world.Submit(query);
+            Complete(world, handle);
+
+            Assert.That(world.TryGetPath(handle, out NavigationPathView path), Is.True);
+            Assert.That(path.PolygonCount, Is.EqualTo(expectedPolygons));
+            Assert.That(path.CrossingSpanCount, Is.EqualTo(expectedPolygons == 0 ? 0 : 1));
+            Assert.That(path.SteeringTargetCount, Is.EqualTo(expectedSteeringTargets));
+            Assert.That(path.GetArea(0).PolygonCount, Is.EqualTo(expectedPolygons));
+            Assert.That(path.GetArea(0).SteeringCount, Is.EqualTo(expectedSteeringTargets));
+        }
+
+        [TestCase(0, PathRequestStatus.Queued)]
+        [TestCase(1, PathRequestStatus.RunningGlobal)]
+        [TestCase(2, PathRequestStatus.RunningLocal)]
+        [TestCase(3, PathRequestStatus.RunningLocal)]
+        public void CancellationWinsAtEveryPreterminalStage(
+            int workSteps,
+            PathRequestStatus expectedStatus)
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            int callbackCount = 0;
+            PathRequestHandle handle = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA),
+                _ => callbackCount++);
+
+            for (int step = 0; step < workSteps; step++)
+            {
+                world.Tick(1);
+            }
+
+            Assert.That(world.GetStatus(handle), Is.EqualTo(expectedStatus));
+            Assert.That(world.Cancel(handle), Is.True);
+            Assert.That(world.Cancel(handle), Is.False);
+            Assert.That(world.Release(handle), Is.False);
+            world.Tick(0);
+
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Cancelled));
+            Assert.That(callbackCount, Is.EqualTo(1));
+            Assert.That(world.TryGetFailure(handle, out _), Is.False);
+            Assert.That(world.TryGetPath(handle, out _), Is.False);
+            Assert.That(world.Release(handle), Is.True);
+        }
+
+        [Test]
+        public void CallbackMayReleaseSubmitAndCancelRequests()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            PathRequestHandle submitted = default;
+            PathRequestHandle victim = default;
+            bool released = false;
+            bool cancelled = false;
+            PathRequestHandle completed = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA),
+                handle =>
+                {
+                    released = world.Release(handle);
+                    submitted = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaA));
+                    cancelled = world.Cancel(victim);
+                });
+
+            world.Tick(64);
+            victim = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaA));
+            world.Tick(0);
+
+            Assert.That(released, Is.True);
+            Assert.That(cancelled, Is.True);
+            Assert.That(world.GetStatus(completed), Is.EqualTo(PathRequestStatus.Invalid));
+            Assert.That(world.GetStatus(victim), Is.EqualTo(PathRequestStatus.Cancelled));
+            Assert.That(world.GetStatus(submitted), Is.EqualTo(PathRequestStatus.Queued));
+            Complete(world, submitted);
+            Assert.That(world.GetStatus(submitted), Is.EqualTo(PathRequestStatus.Completed));
+        }
+
+        [Test]
+        public void CallbackExceptionDoesNotPreventLaterCallbacks()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            int delivered = 0;
+            PathRequestHandle throwing = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA),
+                _ => throw new InvalidOperationException("callback boom"));
+            PathRequestHandle succeeding = world.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA),
+                _ => delivered++);
+            world.Tick(64);
+
+            LogAssert.Expect(LogType.Exception, new Regex("InvalidOperationException: callback boom"));
+            Assert.DoesNotThrow(() => world.Tick(0));
+
+            Assert.That(delivered, Is.EqualTo(1));
+            Assert.That(world.GetStatus(throwing), Is.EqualTo(PathRequestStatus.Completed));
+            Assert.That(world.GetStatus(succeeding), Is.EqualTo(PathRequestStatus.Completed));
+        }
+
+        [Test]
+        public void WarmedIdleTicksDoNotAllocateManagedMemory()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            using var world = new NavigationWorld(fixture.Bake);
+            GC.GetAllocatedBytesForCurrentThread();
+            for (int index = 0; index < 32; index++)
+            {
+                world.Tick(0);
+            }
+
+            long before = GC.GetAllocatedBytesForCurrentThread();
+            for (int index = 0; index < 1024; index++)
+            {
+                world.Tick(0);
+            }
+
+            long allocated = GC.GetAllocatedBytesForCurrentThread() - before;
+            Assert.That(allocated, Is.Zero, "Warmed idle Tick(0) calls allocated managed memory.");
+        }
+
+        [Test]
+        public void ManagedResultCopyOutlivesReleasedViewAndDisposedWorld()
+        {
+            TestWorld fixture = CreateTwoPolygonWorld();
+            var world = new NavigationWorld(fixture.Bake);
+            PathRequestHandle handle = world.Submit(new PathQuery(
+                new NavigationLocation(fixture.AreaA.Id, new Vector3(0.25f, 0f, 0.5f)),
+                new NavigationLocation(fixture.AreaA.Id, new Vector3(1.75f, 0f, 0.5f)),
+                fixture.Policy));
+            Complete(world, handle);
+            Assert.That(world.TryGetPath(handle, out NavigationPathView view), Is.True);
+            NavigationPath copy = view.ToManagedCopy();
+            double totalCost = copy.TotalCost;
+
+            Assert.That(world.Release(handle), Is.True);
+            Assert.That(view.IsValid, Is.False);
+            Assert.Throws<InvalidOperationException>(() => _ = view.TotalCost);
+            world.Dispose();
+
+            Assert.That(copy.TotalCost, Is.EqualTo(totalCost));
+            Assert.That(copy.PolygonCorridor.Count, Is.EqualTo(2));
+            Assert.That(copy.CrossingSpans.Count, Is.EqualTo(1));
+        }
+
+        [Test]
+        public void HostCancelsDestroyedOwnerAndDisposesWorldWhenDisabled()
+        {
+            TestWorld fixture = CreateSingleAreaWorld();
+            var hostObject = new GameObject("NavigationWorldHost test");
+            _assets.Add(hostObject);
+            NavigationWorldHost host = hostObject.AddComponent<NavigationWorldHost>();
+            typeof(NavigationWorldHost)
+                .GetField("_bake", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.SetValue(host, fixture.Bake);
+            Assert.That(host.Initialize(), Is.True);
+            NavigationWorld world = host.World;
+            var owner = new GameObject("request owner");
+            int callbackCount = 0;
+            PathRequestHandle handle = host.Submit(
+                Query(fixture, fixture.AreaA, fixture.AreaA),
+                owner,
+                _ => callbackCount++);
+
+            UnityEngine.Object.DestroyImmediate(owner);
+            typeof(NavigationWorldHost)
+                .GetMethod("Update", BindingFlags.Instance | BindingFlags.NonPublic)
+                ?.Invoke(host, null);
+
+            Assert.That(callbackCount, Is.Zero);
+            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Invalid));
+            hostObject.SetActive(false);
+            Assert.That(world.IsDisposed, Is.True);
+            Assert.That(host.World, Is.Null);
+        }
+
         private TestWorld CreateSingleAreaWorld()
         {
             SemanticRegistryAsset registry = Create<SemanticRegistryAsset>();
@@ -388,6 +655,26 @@ namespace NotRealGames.Areafinder.Tests
             source.SetSemanticRegistry(registry);
             NavigationAreaAsset area = Create<NavigationAreaAsset>();
             area.AddPolygon(Rectangle(0f, 0f, 1f, 1f));
+            source.AddArea(area);
+            NavigationBakeAsset bake = Bake(source);
+            return new TestWorld
+            {
+                Registry = registry,
+                Source = source,
+                Bake = bake,
+                Policy = Compile(new TraversalPolicyBuilder(registry), bake),
+                AreaA = area
+            };
+        }
+
+        private TestWorld CreateTwoPolygonWorld()
+        {
+            SemanticRegistryAsset registry = Create<SemanticRegistryAsset>();
+            NavigationWorldAsset source = Create<NavigationWorldAsset>();
+            source.SetSemanticRegistry(registry);
+            NavigationAreaAsset area = Create<NavigationAreaAsset>();
+            area.AddPolygon(Rectangle(0f, 0f, 1f, 1f));
+            area.AddPolygon(Rectangle(1f, 0f, 2f, 1f));
             source.AddArea(area);
             NavigationBakeAsset bake = Bake(source);
             return new TestWorld

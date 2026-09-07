@@ -1,8 +1,8 @@
 # Areafinder
 
-Areafinder is an authored navigation framework under active pre-1.0 development. Version 0.1 now contains a polygon-native vertical slice: stable authoring identities, a project semantic registry, deterministic baking, policy-aware local and cross-Area routing, scheduler-owned structured result views, a cooperative request lifecycle, targeted revisions and caching, an initial Scene authoring workflow, and a Burst job for multi-polygon local search.
+Areafinder is an authored navigation framework under active pre-1.0 development. Version 0.2 contains a reliability-tested polygon-native vertical slice: stable authoring identities, a project semantic registry, deterministic baking, policy-aware local and cross-Area routing, scheduler-owned structured result views, a cooperative request lifecycle, targeted revisions and caching, an initial Scene authoring workflow, and a Burst job for multi-polygon local search.
 
-The public API and bake schema are still allowed to change. Editor polish, complete characterization coverage, true concurrent job batches, player/AOT and warmed-allocation proof, the HORDE acceptance pass, and the importable 1.0 sample remain release work rather than current guarantees.
+Version 0.2 proves real Unity persistence and domain reload, all current validation and request contracts, direct cache behavior, managed/Burst parity, a zero-allocation warmed idle tick, both Windows player backends, and Room-to-Room import/setup. The public API and bake schema are still pre-1.0. True concurrent job batches and snapshot ownership, full-route zero-allocation work, global-search refinement, broad editor polish, HORDE dogfooding, schema evolution, and post-1.0 backends remain deferred.
 
 ## Documentation
 
@@ -10,6 +10,7 @@ The public API and bake schema are still allowed to change. Editor polish, compl
 - [Authoring and baking](authoring.md): semantic registry, Areas, Portals, polygons, adjacency, validation, and editor workflow.
 - [Runtime and pathfinding](runtime.md): compiled data, policy, global and local routing, requests, revisions, and results.
 - [Semantic mask layout](semantic-mask-layout.md): benchmark method, recorded result, and the current fixed-stride decision.
+- [Performance baseline](performance-baseline.md): repeatable route benchmark method and the 0.2 reference result.
 - [Migration](migration.md): staged evolution from the working NavMesh prototype to the polygon backend.
 - [Testing](testing.md): current smoke tests, required behavioral coverage, and acceptance gates.
 

@@ -122,6 +122,106 @@ namespace NotRealGames.Areafinder.Tests
             Assert.That(allocated, Is.Zero, "The warmed Burst job kernel allocated managed memory.");
         }
 
+        [TestCase(ParityScenario.SamePolygon)]
+        [TestCase(ParityScenario.MultiPolygon)]
+        [TestCase(ParityScenario.Unreachable)]
+        [TestCase(ParityScenario.SemanticPolicy)]
+        [TestCase(ParityScenario.RuntimeMutation)]
+        [TestCase(ParityScenario.EqualCostTie)]
+        public void ManagedReferenceMatchesBurstAcrossRouteScenarios(ParityScenario scenario)
+        {
+            KernelFixture fixture = CreateFixture();
+            using var data = new RuntimeDataScope(fixture.Bake);
+            NavigationRuntimeData runtime = data.Value;
+            int areaIndex = runtime.AreaById[fixture.Area.Id];
+            int startPolygon = runtime.PolygonById[fixture.Start.Id];
+            int goalPolygon = runtime.PolygonById[fixture.Goal.Id];
+            CompiledTraversalPolicy policy = scenario == ParityScenario.SemanticPolicy ||
+                                             scenario == ParityScenario.RuntimeMutation
+                ? fixture.Policy
+                : fixture.NeutralPolicy;
+            var start = new Vector3(0.25f, 0f, 1f);
+            var goal = new Vector3(2.75f, 0f, 1f);
+
+            switch (scenario)
+            {
+                case ParityScenario.SamePolygon:
+                    goalPolygon = startPolygon;
+                    goal = new Vector3(0.75f, 0f, 1f);
+                    break;
+                case ParityScenario.Unreachable:
+                    runtime.SetPolygonEnabled(runtime.PolygonById[fixture.Upper.Id], false);
+                    runtime.SetPolygonEnabled(runtime.PolygonById[fixture.Lower.Id], false);
+                    break;
+                case ParityScenario.RuntimeMutation:
+                    runtime.SetPolygonEnabled(runtime.PolygonById[fixture.Lower.Id], false);
+                    break;
+            }
+
+            CompiledAreaRecord area = runtime.Areas[areaIndex];
+            double areaMultiplier = policy.GetDistanceMultiplier(runtime.SemanticWords, area.SemanticOffset);
+            double baseCost = policy.GetEntryPenalty(runtime.SemanticWords, area.SemanticOffset);
+            ReferenceResult expected = SolveReference(
+                runtime,
+                policy,
+                area,
+                startPolygon,
+                goalPolygon,
+                start,
+                goal,
+                areaMultiplier,
+                baseCost);
+
+            bool found = runtime.PolygonSearch.TryFind(
+                policy,
+                areaIndex,
+                area.PolygonStart,
+                area.PolygonCount,
+                startPolygon,
+                goalPolygon,
+                new float3(start.x, start.y, start.z),
+                new float3(goal.x, goal.y, goal.z),
+                areaMultiplier,
+                baseCost,
+                out double actualCost);
+
+            Assert.That(found, Is.EqualTo(expected.Found));
+            if (!found)
+            {
+                Assert.That(actualCost, Is.EqualTo(double.PositiveInfinity));
+                Assert.That(expected.Corridor, Is.Empty);
+                return;
+            }
+
+            Assert.That(actualCost, Is.EqualTo(expected.Cost).Within(1e-9d));
+            int[] actualCorridor = ReadJobCorridor(runtime.PolygonSearch, startPolygon, goalPolygon);
+            CollectionAssert.AreEqual(expected.Corridor, actualCorridor);
+
+            if (scenario == ParityScenario.RuntimeMutation)
+            {
+                CollectionAssert.DoesNotContain(actualCorridor, runtime.PolygonById[fixture.Lower.Id]);
+                CollectionAssert.Contains(actualCorridor, runtime.PolygonById[fixture.Upper.Id]);
+            }
+            else if (scenario == ParityScenario.EqualCostTie)
+            {
+                Assert.That(runtime.PolygonSearch.TryFind(
+                    policy,
+                    areaIndex,
+                    area.PolygonStart,
+                    area.PolygonCount,
+                    startPolygon,
+                    goalPolygon,
+                    new float3(start.x, start.y, start.z),
+                    new float3(goal.x, goal.y, goal.z),
+                    areaMultiplier,
+                    baseCost,
+                    out _), Is.True);
+                CollectionAssert.AreEqual(
+                    actualCorridor,
+                    ReadJobCorridor(runtime.PolygonSearch, startPolygon, goalPolygon));
+            }
+        }
+
         private KernelFixture CreateFixture()
         {
             SemanticRegistryAsset registry = Create<SemanticRegistryAsset>();
@@ -144,7 +244,12 @@ namespace NotRealGames.Areafinder.Tests
             var builder = new TraversalPolicyBuilder(registry).SetCost(expensive, 4d, 0.25d);
             Assert.That(builder.TryCompile(bake, out CompiledTraversalPolicy policy, out string error),
                 Is.True, error);
-            return new KernelFixture(area, start, lower, goal, bake, policy);
+            var neutralBuilder = new TraversalPolicyBuilder(registry);
+            Assert.That(neutralBuilder.TryCompile(
+                bake,
+                out CompiledTraversalPolicy neutralPolicy,
+                out string neutralError), Is.True, neutralError);
+            return new KernelFixture(area, start, upper, lower, goal, bake, policy, neutralPolicy);
         }
 
         private static ReferenceResult SolveReference(
@@ -329,25 +434,41 @@ namespace NotRealGames.Areafinder.Tests
             internal KernelFixture(
                 NavigationAreaAsset area,
                 NavigationPolygonRecord start,
+                NavigationPolygonRecord upper,
                 NavigationPolygonRecord lower,
                 NavigationPolygonRecord goal,
                 NavigationBakeAsset bake,
-                CompiledTraversalPolicy policy)
+                CompiledTraversalPolicy policy,
+                CompiledTraversalPolicy neutralPolicy)
             {
                 Area = area;
                 Start = start;
+                Upper = upper;
                 Lower = lower;
                 Goal = goal;
                 Bake = bake;
                 Policy = policy;
+                NeutralPolicy = neutralPolicy;
             }
 
             internal NavigationAreaAsset Area { get; }
             internal NavigationPolygonRecord Start { get; }
+            internal NavigationPolygonRecord Upper { get; }
             internal NavigationPolygonRecord Lower { get; }
             internal NavigationPolygonRecord Goal { get; }
             internal NavigationBakeAsset Bake { get; }
             internal CompiledTraversalPolicy Policy { get; }
+            internal CompiledTraversalPolicy NeutralPolicy { get; }
+        }
+
+        public enum ParityScenario
+        {
+            SamePolygon,
+            MultiPolygon,
+            Unreachable,
+            SemanticPolicy,
+            RuntimeMutation,
+            EqualCostTie
         }
 
         private sealed class RuntimeDataScope : IDisposable

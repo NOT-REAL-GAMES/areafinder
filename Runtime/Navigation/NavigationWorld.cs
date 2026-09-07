@@ -526,7 +526,7 @@ namespace NotRealGames.Areafinder
 
         private void PublishReadyRequests()
         {
-            var callbacks = new List<(Action<PathRequestHandle> Callback, PathRequestHandle Handle)>();
+            List<(Action<PathRequestHandle> Callback, PathRequestHandle Handle)> callbacks = null;
             for (int index = 0; index < _slots.Count; index++)
             {
                 RequestSlot slot = _slots[index];
@@ -550,9 +550,15 @@ namespace NotRealGames.Areafinder
                 slot.PendingResult = null;
                 if (slot.Callback != null)
                 {
+                    callbacks ??= new List<(Action<PathRequestHandle>, PathRequestHandle)>();
                     callbacks.Add((slot.Callback, new PathRequestHandle(index, slot.Generation)));
                     slot.Callback = null;
                 }
+            }
+
+            if (callbacks == null)
+            {
+                return;
             }
 
             for (int index = 0; index < callbacks.Count; index++)

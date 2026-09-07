@@ -1,6 +1,7 @@
 param(
     [string]$UnityEditor = 'C:\Program Files\Unity\Hub\Editor\6000.7.0a6\Editor\Unity.exe',
     [string]$PackageRoot = (Split-Path -Parent $PSScriptRoot),
+    [string]$BenchmarkReportPath,
     [switch]$KeepProject
 )
 
@@ -73,6 +74,26 @@ function Assert-TestResults {
     return $total
 }
 
+function Assert-BenchmarkReport {
+    param([string]$Path)
+
+    if (-not (Test-Path -LiteralPath $Path)) {
+        throw "The benchmark test did not produce a report: $Path"
+    }
+
+    $report = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
+    if ($report.marker -ne 'AREAFINDER_BENCHMARK_SUCCESS' -or
+        [long]$report.idleAllocatedBytes -ne 0 -or
+        [double]$report.sameArea16x16.medianRoutesPerSecond -le 0 -or
+        [double]$report.threeArea8x8.medianRoutesPerSecond -le 0) {
+        throw "The benchmark report is incomplete or invalid: $Path"
+    }
+
+    return $report
+}
+
+$previousBenchmarkReport = [Environment]::GetEnvironmentVariable('AREAFINDER_BENCHMARK_REPORT', 'Process')
+
 try {
     Invoke-Unity @('-batchmode', '-nographics', '-quit', '-createProject', $hostProject, '-logFile', '-')
 
@@ -85,6 +106,16 @@ try {
 
     $results = Join-Path $hostProject 'TestResults'
     New-Item -ItemType Directory -Force -Path $results | Out-Null
+    $benchmarkReport = if ([string]::IsNullOrWhiteSpace($BenchmarkReportPath)) {
+        Join-Path $results 'benchmark.json'
+    }
+    elseif ([IO.Path]::IsPathRooted($BenchmarkReportPath)) {
+        [IO.Path]::GetFullPath($BenchmarkReportPath)
+    }
+    else {
+        [IO.Path]::GetFullPath((Join-Path (Get-Location).Path $BenchmarkReportPath))
+    }
+    [Environment]::SetEnvironmentVariable('AREAFINDER_BENCHMARK_REPORT', $benchmarkReport, 'Process')
 
     $editResults = Join-Path $results 'editmode.xml'
     Invoke-Unity @(
@@ -93,7 +124,7 @@ try {
         '-testResults', $editResults,
         '-logFile', (Join-Path $results 'editmode.log')
     )
-    $editCount = Assert-TestResults -Path $editResults -Platform 'Edit Mode' -MinimumTests 6
+    $editCount = Assert-TestResults -Path $editResults -Platform 'Edit Mode' -MinimumTests 9
 
     $playResults = Join-Path $results 'playmode.xml'
     Invoke-Unity @(
@@ -102,14 +133,26 @@ try {
         '-testResults', $playResults,
         '-logFile', (Join-Path $results 'playmode.log')
     )
-    $playCount = Assert-TestResults -Path $playResults -Platform 'Play Mode' -MinimumTests 84
+    $playCount = Assert-TestResults -Path $playResults -Platform 'Play Mode' -MinimumTests 178
+    $benchmark = Assert-BenchmarkReport -Path $benchmarkReport
 
     Write-Host "Areafinder tests passed: $editCount Edit Mode, $playCount Play Mode."
+    Write-Host ("Benchmark medians: 16x16 {0:N1} routes/s, {1:N1} B/request; 3x8x8 {2:N1} routes/s, {3:N1} B/request; idle {4} B." -f
+        [double]$benchmark.sameArea16x16.medianRoutesPerSecond,
+        [double]$benchmark.sameArea16x16.medianAllocatedBytesPerRequest,
+        [double]$benchmark.threeArea8x8.medianRoutesPerSecond,
+        [double]$benchmark.threeArea8x8.medianAllocatedBytesPerRequest,
+        [long]$benchmark.idleAllocatedBytes)
+    Write-Host "Benchmark report: $benchmarkReport"
     if ($KeepProject) {
         Write-Host "Disposable host retained at $hostProject"
     }
 }
 finally {
+    [Environment]::SetEnvironmentVariable(
+        'AREAFINDER_BENCHMARK_REPORT',
+        $previousBenchmarkReport,
+        'Process')
     if (-not $KeepProject -and (Test-Path -LiteralPath $hostProject)) {
         $resolvedHost = [IO.Path]::GetFullPath((Resolve-Path -LiteralPath $hostProject).Path)
         if (-not $resolvedHost.StartsWith($temporaryRoot, [StringComparison]::OrdinalIgnoreCase) -or

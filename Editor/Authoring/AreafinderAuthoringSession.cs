@@ -1,5 +1,6 @@
 using System;
 using System.Collections.Generic;
+using UnityEditor;
 
 namespace NotRealGames.Areafinder.Editor
 {
@@ -75,6 +76,11 @@ namespace NotRealGames.Areafinder.Editor
         private static AuthoringEdgeSelection _secondEdge;
         private static NavigationPath _previewPath;
         private static string _previewSummary;
+
+        static AreafinderAuthoringSession()
+        {
+            Undo.undoRedoPerformed += NotifyAuthoringChanged;
+        }
 
         internal static event Action Changed;
 
