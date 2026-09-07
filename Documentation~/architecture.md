@@ -2,7 +2,7 @@
 
 # Architecture
 
-This document defines the target Areafinder 1.0 architecture. Version 0.1 already implements the core authoring records, flat bake, polygon routing, policies, structured requests/results, revisions, caches, initial editor tooling, and a Burst local-search job. Delivery-gate and 1.0 statements still describe acceptance work and must not be read as a stability promise.
+This document defines the target Areafinder 1.0 architecture. Version 0.2 implements and characterizes the core authoring records, flat bake, polygon routing, policies, structured requests/results, revisions, caches, initial editor tooling, and Burst local-search job. Delivery-gate and 1.0 statements still describe acceptance work and must not be read as a stability promise.
 
 ## System model
 
@@ -44,7 +44,7 @@ The semantic registry uses stable 128-bit IDs and append-only integer slots. Ren
 
 A `NavigationWorldAsset` owns topology and references `NavigationAreaAsset` data. An explicit bake produces primitive arrays for Areas, polygons, vertices, adjacency, Portals, semantic words, and identity lookup. At runtime, a disposable non-singleton `NavigationWorld` owns the compiled view, mutable state, scheduler, revisions, caches, and result pools. An optional `NavigationWorldHost` component supplies Unity lifecycle integration.
 
-Each semantic mask addresses a range in contiguous `ulong` storage. The runtime does not allocate one managed array per polygon. Bake schema 1 uses fixed stride; the [semantic mask layout decision](semantic-mask-layout.md) records why neither trimmed pooling nor interning passed the cross-workload replacement gate. Player/Burst measurements on real bakes are still required before the 1.0 schema is frozen.
+Each semantic mask addresses a range in contiguous `ulong` storage. The runtime does not allocate one managed array per polygon. Bake schema 1 uses fixed stride; the [semantic mask layout decision](semantic-mask-layout.md) records why neither trimmed pooling nor interning passed the cross-workload replacement gate. Version 0.2 preserves that schema and executes real baked routes in Windows Mono/Burst and IL2CPP/Burst players; schema changes still require separate evidence and migration planning before 1.0.
 
 ## Version 1.0 boundary
 

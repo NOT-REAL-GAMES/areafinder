@@ -3,7 +3,7 @@
 Areafinder is an independent, authored navigation and pathfinding framework for Unity. Its ground-navigation model combines explicitly authored Areas and Portals with manually authored polygon surfaces, project-defined semantic properties, agent-specific traversal policy, and asynchronous path requests.
 
 > [!IMPORTANT]
-> Areafinder is under active pre-1.0 development. Version 0.1 contains a working polygon-native vertical slice, but its public API, bake format, and editor workflow may change before 1.0.
+> Areafinder is under active pre-1.0 development. Version 0.2 hardens the working polygon-native vertical slice with persistence, contract, Windows player, and performance evidence, but its public API, bake format, and editor workflow may still change before 1.0.
 
 ```text
 Project semantic registry
@@ -36,7 +36,9 @@ The package currently provides:
 - a Burst/Jobs local-search kernel over persistent native arrays; and
 - an Undo-aware authoring window, Scene tool, overlays, policy preview, and an importable room-to-room sample.
 
-The scheduler and global route construction are still cooperative managed code, multi-polygon jobs complete within their `RunningLocal` tick, and full request-result allocation elimination and concurrent job batches remain 1.0 work.
+Version 0.2 additionally verifies real AssetDatabase/domain-reload persistence, every emitted validation code and tolerance boundary, the complete current request lifecycle, direct cache behavior, managed/Burst route parity, warmed idle `Tick(0)` allocation, sample import/setup, and executable Windows Mono/Burst and IL2CPP/Burst routes.
+
+The scheduler and global route construction are still cooperative managed code, multi-polygon jobs complete within their `RunningLocal` tick, and concurrent batches, snapshot ownership, full-route allocation elimination, global refinement, broader editor UX, HORDE dogfooding, and post-1.0 backends remain future work.
 
 ## Requirements
 
@@ -72,7 +74,7 @@ The 1.0 direction is governed by a few non-negotiable boundaries:
 - Requests are asynchronous and revision-aware; path results are guidance, not movement commands.
 - Unity NavMesh, locomotion, voxel navigation, generated topology, runtime polygon cutting, and crowd avoidance are outside the standard 1.0 implementation.
 
-Read the [architecture](Documentation~/architecture.md), [authoring](Documentation~/authoring.md), [runtime](Documentation~/runtime.md), [migration](Documentation~/migration.md), and [testing](Documentation~/testing.md) documents for the decision-complete target and delivery sequence.
+Read the [architecture](Documentation~/architecture.md), [authoring](Documentation~/authoring.md), [runtime](Documentation~/runtime.md), [migration](Documentation~/migration.md), [testing](Documentation~/testing.md), and [performance baseline](Documentation~/performance-baseline.md) documents for the current guarantees and decision-complete 1.0 direction.
 
 ## Repository layout
 
@@ -82,7 +84,7 @@ Read the [architecture](Documentation~/architecture.md), [authoring](Documentati
 - `Tests/Editor`: Edit Mode tests.
 - `Documentation~`: Package documentation excluded from Unity asset import.
 - `Samples~`: Importable examples, currently the polygon-only Room-to-Room sample.
-- `Tools~`: Disposable Unity test/build runners and the semantic-layout benchmark.
+- `Tools~`: Disposable Unity test, sample, and executable-player runners plus dependency-free benchmarks.
 
 ## Testing
 
@@ -106,7 +108,7 @@ Package metadata, assembly boundaries, forbidden migration dependencies, `.meta`
 ./Tools~/Test-PackageStructure.ps1
 ```
 
-`Run-UnityAotSmoke.ps1` builds a disposable Windows player and verifies that it contains a generated Burst native library. It uses IL2CPP when that Unity module is installed and otherwise reports that it validated the Mono/Burst player pipeline. See [testing](Documentation~/testing.md) for the complete current evidence and remaining 1.0 gates.
+`Run-UnityTests.ps1` also emits and validates a JSON route benchmark report. `Run-RoomToRoomSmoke.ps1` imports and executes the sample setup in a disposable host. `Run-UnityAotSmoke.ps1` builds, launches, and verifies real routes in both Windows Mono/Burst and Windows IL2CPP/Burst players; missing IL2CPP support is a hard failure. See [testing](Documentation~/testing.md) for the complete 0.2 evidence and remaining 1.0 gates.
 
 ## Contributing
 

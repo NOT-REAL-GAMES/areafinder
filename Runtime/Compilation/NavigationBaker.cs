@@ -170,7 +170,7 @@ namespace NotRealGames.Areafinder
             FingerprintBuilder fingerprint = FingerprintBuilder.Create();
             SemanticRegistryAsset registry = source.SemanticRegistry;
             fingerprint.Add(registry != null ? registry.SchemaFingerprint : 0UL);
-            AddSettings(ref fingerprint, source.InferenceSettings);
+            AddSettings(ref fingerprint, source.RawInferenceSettings);
 
             var areas = new List<NavigationAreaAsset>();
             fingerprint.Add(source.Areas.Count);
@@ -295,7 +295,7 @@ namespace NotRealGames.Areafinder
                 return data;
             }
 
-            AdjacencyInferenceSettings settings = source.InferenceSettings;
+            AdjacencyInferenceSettings settings = source.RawInferenceSettings;
             if (!settings.IsValid)
             {
                 AddError(data, NavigationValidationCode.InvalidSettings, NavigationValidationTargetKind.World,

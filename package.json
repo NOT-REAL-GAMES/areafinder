@@ -1,6 +1,6 @@
 {
   "name": "com.notrealgames.areafinder",
-  "version": "0.1.0",
+  "version": "0.2.0",
   "displayName": "Areafinder",
   "description": "An early-development package for authored polygon navigation and pathfinding in Unity.",
   "unity": "6000.7",

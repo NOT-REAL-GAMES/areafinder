@@ -2,7 +2,7 @@
 
 The prototype under `VICIOUS CYCLE/Assets/Areafinder` remains a read-only behavioral oracle. The new package is an evolutionary replacement, not a source-compatible port and not a clean-room rewrite.
 
-The current 0.1 package is already polygon-native and contains no NavMesh or High Precision runtime code. Portable prototype behaviors are being recreated as package tests; no migration adapter has been added because the polygon path does not currently need one.
+The current 0.2 package is already polygon-native and contains no NavMesh or High Precision runtime code. Portable behavior is captured in package tests; no migration adapter has been added because the polygon path does not currently need one.
 
 ## Behavior to preserve
 

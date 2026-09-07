@@ -1,8 +1,8 @@
 # Authoring and baking
 
-This document specifies the complete target 1.0 authoring model. Version 0.1 implements the source assets, stable identities, semantic registry and compaction flow, adjacency inference and overrides, structured validation, deterministic explicit baking, stale-bake guards, and an initial Undo-aware authoring window and Scene tool.
+This document specifies the complete target 1.0 authoring model. Version 0.2 implements the source assets, stable identities, semantic registry and compaction flow, adjacency inference and overrides, structured validation, deterministic explicit baking, stale-bake guards, and an initial Undo-aware authoring window and Scene tool.
 
-The current editor can create and edit polygons, insert or remove vertices, split and merge compatible cells, paint semantics, author adjacency overrides and Portals, inspect compiled links, bake, and preview a policy route. A polished selection workflow, exhaustive visual explanations at every tolerance boundary, a complete library of explicit repair commands, serialization/domain-reload acceptance, and production-scale usability work remain before 1.0.
+The current editor can create and edit polygons, insert or remove vertices, split and merge compatible cells, paint semantics, author adjacency overrides and Portals, inspect compiled links, bake, and preview a policy route. Undo/redo now refreshes validation, inferred-adjacency previews, and route previews, including after domain reload. Real AssetDatabase persistence is covered across registry, Area, world, Portal, policy, and bake data. A polished selection workflow, richer visual explanations, a repair-command library, and production-scale usability work remain before 1.0.
 
 ## Semantic registry
 
