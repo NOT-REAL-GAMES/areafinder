@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
 using NUnit.Framework;
 using UnityEngine;
 
@@ -93,7 +95,8 @@ namespace NotRealGames.Areafinder.Tests
 
         private static void Complete(NavigationWorld world, PathRequestHandle handle)
         {
-            for (int tick = 0; tick < 16; tick++)
+            var timeout = Stopwatch.StartNew();
+            while (timeout.Elapsed < TimeSpan.FromSeconds(10d))
             {
                 world.Tick(64);
                 PathRequestStatus status = world.GetStatus(handle);
@@ -102,9 +105,11 @@ namespace NotRealGames.Areafinder.Tests
                 {
                     return;
                 }
+
+                Thread.Yield();
             }
 
-            Assert.Fail("The navigation request did not become terminal.");
+            Assert.Fail("The navigation request did not become terminal within 10 seconds.");
         }
 
         private static string FormatIssues(NavigationBakeResult result)

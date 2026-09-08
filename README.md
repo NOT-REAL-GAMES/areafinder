@@ -3,7 +3,7 @@
 Areafinder is an independent, authored navigation and pathfinding framework for Unity. Its ground-navigation model combines explicitly authored Areas and Portals with manually authored polygon surfaces, project-defined semantic properties, agent-specific traversal policy, and asynchronous path requests.
 
 > [!IMPORTANT]
-> Areafinder is under active pre-1.0 development. Version 0.2 hardens the working polygon-native vertical slice with persistence, contract, Windows player, and performance evidence, but its public API, bake format, and editor workflow may still change before 1.0.
+> Areafinder is under active pre-1.0 development. Version 0.3 adds bounded many-request concurrency and job-safe runtime mutation to the reliability-tested polygon-native slice, but its public API, bake format, and editor workflow may still change before 1.0.
 
 ```text
 Project semantic registry
@@ -32,13 +32,13 @@ The package currently provides:
 - authored convex 2.5D polygons, automatic edge adjacency, persistent connection overrides, and Area-attached Portals;
 - structured validation, deterministic flat bakes, and stale-bake rejection for play mode and player builds;
 - policy-aware local polygon and cross-Area routing with corridors, crossing spans, and optional funnel steering targets;
-- a disposable `NavigationWorld`, queued mutations, targeted revisions, bounded Portal-pair caches, cancellation, priorities, deferred callbacks, and structured result views;
-- a Burst/Jobs local-search kernel over persistent native arrays; and
+- a disposable `NavigationWorld`, copy-on-write runtime snapshots, queued mutations, targeted revisions, bounded Portal-pair caches, cancellation, priorities, deferred callbacks, and structured result views;
+- bounded concurrent Burst/Jobs local searches over persistent native arrays and independently owned scratch lanes; and
 - an Undo-aware authoring window, Scene tool, overlays, policy preview, and an importable room-to-room sample.
 
-Version 0.2 additionally verifies real AssetDatabase/domain-reload persistence, every emitted validation code and tolerance boundary, the complete current request lifecycle, direct cache behavior, managed/Burst route parity, warmed idle `Tick(0)` allocation, sample import/setup, and executable Windows Mono/Burst and IL2CPP/Burst routes.
+Version 0.3 retains the complete 0.2 reliability matrix and adds generation-safe physical work ownership, concurrent cancellation/release/slot-reuse coverage, deterministic admission and route parity, mutation snapshots, cap-one/cap-four performance evidence, richer executable player probes, and a 72-agent seeded HORDE Rigidbody stress/soak consumer.
 
-The scheduler and global route construction are still cooperative managed code, multi-polygon jobs complete within their `RunningLocal` tick, and concurrent batches, snapshot ownership, full-route allocation elimination, global refinement, broader editor UX, HORDE dogfooding, and post-1.0 backends remain future work.
+Global route construction remains deterministic cooperative managed code, while independent requests can keep multiple local Burst jobs in flight. Areafinder returns guidance only: HORDE retains locomotion, collision, steering, avoidance, and replanning policy. Intra-request job fan-out, full-route allocation guarantees, A*/optimistic global refinement, broader editor UX, schema changes, and post-1.0 backends remain future work.
 
 ## Requirements
 
@@ -108,7 +108,7 @@ Package metadata, assembly boundaries, forbidden migration dependencies, `.meta`
 ./Tools~/Test-PackageStructure.ps1
 ```
 
-`Run-UnityTests.ps1` also emits and validates a JSON route benchmark report. `Run-RoomToRoomSmoke.ps1` imports and executes the sample setup in a disposable host. `Run-UnityAotSmoke.ps1` builds, launches, and verifies real routes in both Windows Mono/Burst and Windows IL2CPP/Burst players; missing IL2CPP support is a hard failure. See [testing](Documentation~/testing.md) for the complete 0.2 evidence and remaining 1.0 gates.
+`Run-UnityTests.ps1` also emits and validates a JSON concurrency benchmark report. `Run-RoomToRoomSmoke.ps1` imports and executes the sample setup in a disposable host. `Run-UnityAotSmoke.ps1` builds, launches, and verifies concurrent mutation/recovery routes in both Windows Mono/Burst and Windows IL2CPP/Burst players; missing IL2CPP support is a hard failure. See [testing](Documentation~/testing.md) for the complete 0.3 evidence and remaining 1.0 gates.
 
 ## Contributing
 

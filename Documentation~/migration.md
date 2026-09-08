@@ -2,7 +2,7 @@
 
 The prototype under `VICIOUS CYCLE/Assets/Areafinder` remains a read-only behavioral oracle. The new package is an evolutionary replacement, not a source-compatible port and not a clean-room rewrite.
 
-The current 0.2 package is already polygon-native and contains no NavMesh or High Precision runtime code. Portable behavior is captured in package tests; no migration adapter has been added because the polygon path does not currently need one.
+The current 0.3 package is already polygon-native and contains no NavMesh or High Precision runtime code. Portable behavior is captured in package tests; no migration adapter has been added because the polygon path does not currently need one.
 
 ## Behavior to preserve
 
@@ -37,7 +37,7 @@ Completion requires static checks that core package source contains no reference
 
 HORDE is the manual integration project for authoring, policy preview, side-by-side reference scenes, and Rigidbody consumers. Package tests remain authoritative and run in disposable Unity projects so HORDE state cannot hide package dependencies.
 
-The minimum polygon vertical slice is intentionally small: draw two navigable rooms, infer their internal adjacency, exercise an override, attach both sides of an authored Portal, request a cross-Area route, and feed its optional steering targets to a Rigidbody controller.
+The 0.3 dogfood gate creates two navigable Areas and runs 72 seeded agents through concurrent cancellation, mutation staleness, closed-Portal failure, reopening, replanning, destruction/respawn, and a longer diagnostic soak, then feeds recovered steering guidance to project-owned kinematic Rigidbody consumers. This integration deliberately leaves locomotion, collisions, steering ownership, avoidance, and replanning policy in HORDE; Areafinder adds no package-level agent abstraction.
 
 ## Post-1.0 validation
 

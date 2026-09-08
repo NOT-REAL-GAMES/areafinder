@@ -2,11 +2,13 @@ using System;
 using System.Collections.Generic;
 using System.Diagnostics;
 using System.IO;
+using System.Threading;
 using NUnit.Framework;
 using UnityEditor;
 using UnityEditor.Build;
 using UnityEditor.PackageManager;
 using UnityEngine;
+using Unity.Jobs.LowLevel.Unsafe;
 using Debug = UnityEngine.Debug;
 
 namespace NotRealGames.Areafinder.Editor.Tests
@@ -38,8 +40,8 @@ namespace NotRealGames.Areafinder.Editor.Tests
             BenchmarkFixture sameArea = CreateSameAreaFixture();
             BenchmarkFixture crossArea = CreateCrossAreaFixture();
             long idleBytes = MeasureIdleAllocation(sameArea);
-            BenchmarkMeasurement sameAreaResult = Measure(sameArea);
-            BenchmarkMeasurement crossAreaResult = Measure(crossArea);
+            ConcurrencyComparison sameAreaResult = MeasureComparison(sameArea);
+            ConcurrencyComparison crossAreaResult = MeasureComparison(crossArea);
             var report = new BenchmarkReport
             {
                 marker = SuccessMarker,
@@ -58,8 +60,9 @@ namespace NotRealGames.Areafinder.Editor.Tests
                 requestsPerSample = RequestsPerSample,
                 idleTickCount = IdleTickCount,
                 idleAllocatedBytes = idleBytes,
-                sameArea16x16 = sameAreaResult,
-                threeArea8x8 = crossAreaResult
+                workerCount = JobsUtility.JobWorkerCount,
+                sameArea32x32 = sameAreaResult,
+                threeArea16x16 = crossAreaResult
             };
 
             string json = JsonUtility.ToJson(report, true);
@@ -77,6 +80,12 @@ namespace NotRealGames.Areafinder.Editor.Tests
 
             Debug.Log($"{SuccessMarker}{Environment.NewLine}{json}");
             Assert.That(idleBytes, Is.Zero, "Warmed idle Tick(0) calls allocated managed memory.");
+            if (SystemInfo.processorType.IndexOf("Ryzen 9 7900X", StringComparison.OrdinalIgnoreCase) >= 0 &&
+                sameAreaResult.cap4.effectiveMaxConcurrentSearches >= 4)
+            {
+                Assert.That(sameAreaResult.cap4ToCap1ThroughputRatio, Is.GreaterThanOrEqualTo(1.5d),
+                    "The four-lane 32x32 reference-host baseline must be at least 1.5x cap one.");
+            }
         }
 
         private static long MeasureIdleAllocation(BenchmarkFixture fixture)
@@ -97,26 +106,50 @@ namespace NotRealGames.Areafinder.Editor.Tests
             return GC.GetAllocatedBytesForCurrentThread() - before;
         }
 
-        private static BenchmarkMeasurement Measure(BenchmarkFixture fixture)
+        private static ConcurrencyComparison MeasureComparison(BenchmarkFixture fixture)
         {
-            using var world = new NavigationWorld(fixture.Bake);
-            for (int index = 0; index < WarmupCount; index++)
+            BenchmarkMeasurement cap1 = Measure(fixture, 1);
+            BenchmarkMeasurement cap4 = Measure(fixture, 4);
+            return new ConcurrencyComparison
             {
-                RunCycle(world, fixture);
+                cap1 = cap1,
+                cap4 = cap4,
+                cap4ToCap1ThroughputRatio = cap4.medianRoutesPerSecond / cap1.medianRoutesPerSecond
+            };
+        }
+
+        private static BenchmarkMeasurement Measure(BenchmarkFixture fixture, int concurrency)
+        {
+            using var world = new NavigationWorld(fixture.Bake, 0, concurrency);
+            var warmupHandles = new PathRequestHandle[WarmupCount];
+            for (int index = 0; index < warmupHandles.Length; index++)
+            {
+                warmupHandles[index] = world.Submit(fixture.Queries[index]);
             }
+
+            int warmupPeak = 0;
+            DrainAndRelease(world, fixture, warmupHandles, null, null, ref warmupPeak);
 
             var routesPerSecond = new double[SampleCount];
             var bytesPerRequest = new double[SampleCount];
+            var completionLatency = new double[SampleCount * RequestsPerSample];
+            var handles = new PathRequestHandle[RequestsPerSample];
             var stopwatch = new Stopwatch();
+            int peakInFlight = 0;
             for (int sample = 0; sample < SampleCount; sample++)
             {
+                int latencyOffset = sample * RequestsPerSample;
                 long allocationStart = GC.GetAllocatedBytesForCurrentThread();
                 stopwatch.Restart();
-                for (int request = 0; request < RequestsPerSample; request++)
-                {
-                    RunCycle(world, fixture);
-                }
-
+                world.SubmitBatch(fixture.Queries, handles);
+                DrainAndRelease(
+                    world,
+                    fixture,
+                    handles,
+                    stopwatch,
+                    completionLatency,
+                    ref peakInFlight,
+                    latencyOffset);
                 stopwatch.Stop();
                 long allocated = GC.GetAllocatedBytesForCurrentThread() - allocationStart;
                 routesPerSecond[sample] = RequestsPerSample / stopwatch.Elapsed.TotalSeconds;
@@ -125,81 +158,158 @@ namespace NotRealGames.Areafinder.Editor.Tests
 
             Array.Sort(routesPerSecond);
             Array.Sort(bytesPerRequest);
+            Array.Sort(completionLatency);
             return new BenchmarkMeasurement
             {
                 medianRoutesPerSecond = routesPerSecond[SampleCount / 2],
-                medianAllocatedBytesPerRequest = bytesPerRequest[SampleCount / 2]
+                medianAllocatedBytesPerRequest = bytesPerRequest[SampleCount / 2],
+                medianCompletionLatencyMilliseconds = Percentile(completionLatency, 0.5d),
+                p95CompletionLatencyMilliseconds = Percentile(completionLatency, 0.95d),
+                effectiveMaxConcurrentSearches = world.EffectiveMaxConcurrentSearches,
+                peakInFlightJobs = peakInFlight
             };
         }
 
-        private static void RunCycle(NavigationWorld world, BenchmarkFixture fixture)
+        private static void DrainAndRelease(
+            NavigationWorld world,
+            BenchmarkFixture fixture,
+            PathRequestHandle[] handles,
+            Stopwatch stopwatch,
+            double[] completionLatency,
+            ref int peakInFlight,
+            int latencyOffset = 0)
         {
-            PathRequestHandle handle = world.Submit(fixture.Query);
-            world.Tick(64);
-            world.Tick(0);
-            if (world.GetStatus(handle) != PathRequestStatus.Completed ||
-                !world.TryGetPath(handle, out NavigationPathView path) ||
-                path.PolygonCount < fixture.MinimumPolygonCount ||
-                path.PortalTransitionCount != fixture.ExpectedPortalCount ||
-                !world.IsCurrent(path) ||
-                !world.Release(handle))
+            var observed = new bool[handles.Length];
+            int terminal = 0;
+            var timeout = Stopwatch.StartNew();
+            while (terminal < handles.Length && timeout.Elapsed < TimeSpan.FromSeconds(60d))
             {
-                throw new InvalidOperationException("The benchmark route cycle did not complete correctly.");
+                world.Tick(64);
+                peakInFlight = Math.Max(peakInFlight, world.InFlightSearchCount);
+                double elapsed = stopwatch?.Elapsed.TotalMilliseconds ?? 0d;
+                for (int index = 0; index < handles.Length; index++)
+                {
+                    if (observed[index])
+                    {
+                        continue;
+                    }
+
+                    PathRequestStatus status = world.GetStatus(handles[index]);
+                    if (!IsTerminal(status))
+                    {
+                        continue;
+                    }
+
+                    observed[index] = true;
+                    if (completionLatency != null)
+                    {
+                        completionLatency[latencyOffset + index] = elapsed;
+                    }
+
+                    terminal++;
+                }
+
+                Thread.Yield();
             }
+
+            if (terminal != handles.Length)
+            {
+                throw new TimeoutException("The benchmark request batch did not complete within 60 seconds.");
+            }
+
+            for (int index = 0; index < handles.Length; index++)
+            {
+                PathRequestHandle handle = handles[index];
+                if (world.GetStatus(handle) != PathRequestStatus.Completed ||
+                    !world.TryGetPath(handle, out NavigationPathView path) ||
+                    path.PolygonCount < fixture.MinimumPolygonCount ||
+                    path.PortalTransitionCount != fixture.ExpectedPortalCount ||
+                    !world.IsCurrent(path) ||
+                    !world.Release(handle))
+                {
+                    throw new InvalidOperationException("The benchmark route batch did not complete correctly.");
+                }
+            }
+        }
+
+        private static bool IsTerminal(PathRequestStatus status)
+        {
+            return status == PathRequestStatus.Completed || status == PathRequestStatus.Failed ||
+                   status == PathRequestStatus.Cancelled || status == PathRequestStatus.Stale;
+        }
+
+        private static double Percentile(double[] sortedValues, double percentile)
+        {
+            int index = (int)Math.Ceiling(percentile * sortedValues.Length) - 1;
+            return sortedValues[Math.Max(0, Math.Min(index, sortedValues.Length - 1))];
         }
 
         private BenchmarkFixture CreateSameAreaFixture()
         {
             SemanticRegistryAsset registry = Create<SemanticRegistryAsset>();
-            NavigationAreaAsset area = CreateGridArea(16, 16, out NavigationPolygonRecord[,] polygons);
+            const int size = 32;
+            NavigationAreaAsset area = CreateGridArea(size, size, out _);
             NavigationWorldAsset source = Create<NavigationWorldAsset>();
             source.SetSemanticRegistry(registry);
             source.AddArea(area);
             NavigationBakeAsset bake = Bake(source);
             CompiledTraversalPolicy policy = Compile(registry, bake);
-            return new BenchmarkFixture(
-                bake,
-                new PathQuery(
-                    new NavigationLocation(area.Id, new Vector3(0.25f, 0f, 0.25f)),
-                    new NavigationLocation(area.Id, new Vector3(15.75f, 0f, 15.75f)),
-                    policy),
-                31,
-                0);
+            var queries = new PathQuery[RequestsPerSample];
+            for (int index = 0; index < queries.Length; index++)
+            {
+                queries[index] = new PathQuery(
+                    new NavigationLocation(
+                        area.Id,
+                        new Vector3(index % 8 + 0.25f, 0f, index * 5 % size + 0.25f)),
+                    new NavigationLocation(
+                        area.Id,
+                        new Vector3(size - 1 - index % 8 + 0.75f, 0f, size - 1 - index * 11 % size + 0.75f)),
+                    policy);
+            }
+
+            return new BenchmarkFixture(bake, queries, 18, 0);
         }
 
         private BenchmarkFixture CreateCrossAreaFixture()
         {
             SemanticRegistryAsset registry = Create<SemanticRegistryAsset>();
-            NavigationAreaAsset first = CreateGridArea(8, 8, out NavigationPolygonRecord[,] firstPolygons);
-            NavigationAreaAsset second = CreateGridArea(8, 8, out NavigationPolygonRecord[,] secondPolygons);
-            NavigationAreaAsset third = CreateGridArea(8, 8, out NavigationPolygonRecord[,] thirdPolygons);
+            const int size = 16;
+            NavigationAreaAsset first = CreateGridArea(size, size, out NavigationPolygonRecord[,] firstPolygons);
+            NavigationAreaAsset second = CreateGridArea(size, size, out NavigationPolygonRecord[,] secondPolygons);
+            NavigationAreaAsset third = CreateGridArea(size, size, out NavigationPolygonRecord[,] thirdPolygons);
             NavigationWorldAsset source = Create<NavigationWorldAsset>();
             source.SetSemanticRegistry(registry);
             source.AddArea(first);
             source.AddArea(second);
             source.AddArea(third);
             source.AddPortal(
-                Span(first, firstPolygons[7, 3], 2),
-                Span(second, secondPolygons[0, 3], 0),
+                Span(first, firstPolygons[size - 1, 7], 2),
+                Span(second, secondPolygons[0, 7], 0),
                 PortalDirection.SourceToDestination,
                 0.5d,
-                new PortalTransform(new Double3(-8d, 0d, 0d), Quaternion.identity));
+                new PortalTransform(new Double3(-size, 0d, 0d), Quaternion.identity));
             source.AddPortal(
-                Span(second, secondPolygons[7, 4], 2),
-                Span(third, thirdPolygons[0, 4], 0),
+                Span(second, secondPolygons[size - 1, 8], 2),
+                Span(third, thirdPolygons[0, 8], 0),
                 PortalDirection.SourceToDestination,
                 0.5d,
-                new PortalTransform(new Double3(-8d, 0d, 0d), Quaternion.identity));
+                new PortalTransform(new Double3(-size, 0d, 0d), Quaternion.identity));
             NavigationBakeAsset bake = Bake(source);
             CompiledTraversalPolicy policy = Compile(registry, bake);
-            return new BenchmarkFixture(
-                bake,
-                new PathQuery(
-                    new NavigationLocation(first.Id, new Vector3(0.25f, 0f, 0.25f)),
-                    new NavigationLocation(third.Id, new Vector3(7.75f, 0f, 7.75f)),
-                    policy),
-                24,
-                2);
+            var queries = new PathQuery[RequestsPerSample];
+            for (int index = 0; index < queries.Length; index++)
+            {
+                queries[index] = new PathQuery(
+                    new NavigationLocation(
+                        first.Id,
+                        new Vector3(index % 4 + 0.25f, 0f, index * 3 % size + 0.25f)),
+                    new NavigationLocation(
+                        third.Id,
+                        new Vector3(size - 1 - index % 4 + 0.75f, 0f, size - 1 - index * 5 % size + 0.75f)),
+                    policy);
+            }
+
+            return new BenchmarkFixture(bake, queries, 20, 2);
         }
 
         private NavigationAreaAsset CreateGridArea(
@@ -302,18 +412,18 @@ namespace NotRealGames.Areafinder.Editor.Tests
         {
             internal BenchmarkFixture(
                 NavigationBakeAsset bake,
-                PathQuery query,
+                PathQuery[] queries,
                 int minimumPolygonCount,
                 int expectedPortalCount)
             {
                 Bake = bake;
-                Query = query;
+                Queries = queries;
                 MinimumPolygonCount = minimumPolygonCount;
                 ExpectedPortalCount = expectedPortalCount;
             }
 
             internal NavigationBakeAsset Bake { get; }
-            internal PathQuery Query { get; }
+            internal PathQuery[] Queries { get; }
             internal int MinimumPolygonCount { get; }
             internal int ExpectedPortalCount { get; }
         }
@@ -323,6 +433,18 @@ namespace NotRealGames.Areafinder.Editor.Tests
         {
             public double medianRoutesPerSecond;
             public double medianAllocatedBytesPerRequest;
+            public double medianCompletionLatencyMilliseconds;
+            public double p95CompletionLatencyMilliseconds;
+            public int effectiveMaxConcurrentSearches;
+            public int peakInFlightJobs;
+        }
+
+        [Serializable]
+        private sealed class ConcurrencyComparison
+        {
+            public BenchmarkMeasurement cap1;
+            public BenchmarkMeasurement cap4;
+            public double cap4ToCap1ThroughputRatio;
         }
 
         [Serializable]
@@ -344,8 +466,9 @@ namespace NotRealGames.Areafinder.Editor.Tests
             public int requestsPerSample;
             public int idleTickCount;
             public long idleAllocatedBytes;
-            public BenchmarkMeasurement sameArea16x16;
-            public BenchmarkMeasurement threeArea8x8;
+            public int workerCount;
+            public ConcurrencyComparison sameArea32x32;
+            public ConcurrencyComparison threeArea16x16;
         }
     }
 }

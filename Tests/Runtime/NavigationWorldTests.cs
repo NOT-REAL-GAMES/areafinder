@@ -2,6 +2,7 @@ using System;
 using System.Collections.Generic;
 using System.Reflection;
 using System.Text.RegularExpressions;
+using System.Threading;
 using NUnit.Framework;
 using UnityEngine;
 using UnityEngine.TestTools;
@@ -31,11 +32,9 @@ namespace NotRealGames.Areafinder.Tests
             PathRequestHandle handle = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaA));
 
             Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Queued));
-            world.Tick(1);
-            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.RunningGlobal));
-            world.Tick(1);
-            Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.RunningLocal));
-            world.Tick(1);
+            AdvanceUntilStatus(world, handle, PathRequestStatus.RunningGlobal);
+            AdvanceUntilStatus(world, handle, PathRequestStatus.RunningLocal);
+            AdvanceUntilReadyForPublication(world, handle);
             Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.RunningLocal),
                 "terminal publication is deferred to a later tick");
             world.Tick(0);
@@ -135,12 +134,11 @@ namespace NotRealGames.Areafinder.Tests
                 Query(fixture, fixture.AreaA, fixture.AreaA),
                 _ => callbacks++);
 
-            world.Tick(1);
+            AdvanceUntilReadyForPublication(world, handle);
             Assert.That(world.Cancel(handle), Is.True);
             Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Cancelled));
             Assert.That(callbacks, Is.Zero);
-            world.Tick(64);
-            world.Tick(64);
+            world.Tick(0);
 
             Assert.That(callbacks, Is.EqualTo(1));
             Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Cancelled));
@@ -156,9 +154,7 @@ namespace NotRealGames.Areafinder.Tests
             world.Tick(1);
 
             Assert.That(world.MarkAreaDirty(fixture.AreaA.Id), Is.True);
-            world.Tick(1);
-            world.Tick(1);
-            world.Tick(0);
+            Complete(world, handle);
 
             Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.Stale));
             Assert.That(world.TryGetPath(handle, out _), Is.False);
@@ -370,8 +366,7 @@ namespace NotRealGames.Areafinder.Tests
                     callbackStatus = world.GetStatus(completed);
                 });
 
-            world.Tick(64);
-
+            AdvanceUntilReadyForPublication(world, handle);
             Assert.That(callbackCount, Is.Zero);
             Assert.That(world.GetStatus(handle), Is.EqualTo(PathRequestStatus.RunningLocal));
             world.Tick(0);
@@ -501,9 +496,17 @@ namespace NotRealGames.Areafinder.Tests
                 Query(fixture, fixture.AreaA, fixture.AreaA),
                 _ => callbackCount++);
 
-            for (int step = 0; step < workSteps; step++)
+            switch (workSteps)
             {
-                world.Tick(1);
+                case 1:
+                    AdvanceUntilStatus(world, handle, PathRequestStatus.RunningGlobal);
+                    break;
+                case 2:
+                    AdvanceUntilInFlight(world, handle);
+                    break;
+                case 3:
+                    AdvanceUntilReadyForPublication(world, handle);
+                    break;
             }
 
             Assert.That(world.GetStatus(handle), Is.EqualTo(expectedStatus));
@@ -537,7 +540,7 @@ namespace NotRealGames.Areafinder.Tests
                     cancelled = world.Cancel(victim);
                 });
 
-            world.Tick(64);
+            AdvanceUntilReadyForPublication(world, completed);
             victim = world.Submit(Query(fixture, fixture.AreaA, fixture.AreaA));
             world.Tick(0);
 
@@ -562,10 +565,9 @@ namespace NotRealGames.Areafinder.Tests
             PathRequestHandle succeeding = world.Submit(
                 Query(fixture, fixture.AreaA, fixture.AreaA),
                 _ => delivered++);
-            world.Tick(64);
 
             LogAssert.Expect(LogType.Exception, new Regex("InvalidOperationException: callback boom"));
-            Assert.DoesNotThrow(() => world.Tick(0));
+            Assert.DoesNotThrow(() => Complete(world, throwing, succeeding));
 
             Assert.That(delivered, Is.EqualTo(1));
             Assert.That(world.GetStatus(throwing), Is.EqualTo(PathRequestStatus.Completed));
@@ -836,7 +838,8 @@ namespace NotRealGames.Areafinder.Tests
 
         private static void Complete(NavigationWorld world, params PathRequestHandle[] handles)
         {
-            for (int tick = 0; tick < 32; tick++)
+            var timeout = System.Diagnostics.Stopwatch.StartNew();
+            while (timeout.Elapsed < TimeSpan.FromSeconds(10d))
             {
                 world.Tick(64);
                 bool allTerminal = true;
@@ -853,9 +856,76 @@ namespace NotRealGames.Areafinder.Tests
                 {
                     return;
                 }
+
+                Thread.Yield();
             }
 
-            Assert.Fail("Requests did not reach terminal states within the test budget.");
+            Assert.Fail("Requests did not reach terminal states within 10 seconds.");
+        }
+
+        private static void AdvanceUntilStatus(
+            NavigationWorld world,
+            PathRequestHandle handle,
+            PathRequestStatus expected)
+        {
+            var timeout = System.Diagnostics.Stopwatch.StartNew();
+            while (timeout.Elapsed < TimeSpan.FromSeconds(10d))
+            {
+                if (world.GetStatus(handle) == expected)
+                {
+                    return;
+                }
+
+                world.Tick(1);
+                Thread.Yield();
+            }
+
+            Assert.Fail($"Request did not reach {expected} within 10 seconds.");
+        }
+
+        private static void AdvanceUntilInFlight(
+            NavigationWorld world,
+            PathRequestHandle handle)
+        {
+            var timeout = System.Diagnostics.Stopwatch.StartNew();
+            while (timeout.Elapsed < TimeSpan.FromSeconds(10d))
+            {
+                world.Tick(64);
+                if (world.GetStatus(handle) == PathRequestStatus.RunningLocal &&
+                    world.InFlightSearchCount > 0)
+                {
+                    return;
+                }
+
+                Thread.Yield();
+            }
+
+            Assert.Fail("Request did not schedule local work within 10 seconds.");
+        }
+
+        private static void AdvanceUntilReadyForPublication(
+            NavigationWorld world,
+            params PathRequestHandle[] handles)
+        {
+            var timeout = System.Diagnostics.Stopwatch.StartNew();
+            while (timeout.Elapsed < TimeSpan.FromSeconds(10d))
+            {
+                world.Tick(64);
+                bool ready = world.InFlightSearchCount == 0;
+                for (int index = 0; index < handles.Length; index++)
+                {
+                    ready &= world.GetStatus(handles[index]) == PathRequestStatus.RunningLocal;
+                }
+
+                if (ready)
+                {
+                    return;
+                }
+
+                Thread.Yield();
+            }
+
+            Assert.Fail("Requests did not reach pre-publication within 10 seconds.");
         }
 
         private T Create<T>() where T : ScriptableObject

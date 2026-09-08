@@ -1,8 +1,8 @@
 # Areafinder
 
-Areafinder is an authored navigation framework under active pre-1.0 development. Version 0.2 contains a reliability-tested polygon-native vertical slice: stable authoring identities, a project semantic registry, deterministic baking, policy-aware local and cross-Area routing, scheduler-owned structured result views, a cooperative request lifecycle, targeted revisions and caching, an initial Scene authoring workflow, and a Burst job for multi-polygon local search.
+Areafinder is an authored navigation framework under active pre-1.0 development. Version 0.3 contains a reliability-tested polygon-native vertical slice: stable authoring identities, a project semantic registry, deterministic baking, policy-aware local and cross-Area routing, scheduler-owned structured result views, bounded concurrent local Burst jobs, copy-on-write mutation snapshots, targeted revisions and caching, and an initial Scene authoring workflow.
 
-Version 0.2 proves real Unity persistence and domain reload, all current validation and request contracts, direct cache behavior, managed/Burst parity, a zero-allocation warmed idle tick, both Windows player backends, and Room-to-Room import/setup. The public API and bake schema are still pre-1.0. True concurrent job batches and snapshot ownership, full-route zero-allocation work, global-search refinement, broad editor polish, HORDE dogfooding, schema evolution, and post-1.0 backends remain deferred.
+Version 0.3 retains the complete persistence, validation, request, cache, parity, idle-allocation, Windows-player, and Room-to-Room evidence from 0.2. It adds generation-safe physical work ownership, concurrent request execution, mutation snapshots, cap-one/cap-four baselines, and a 72-agent seeded HORDE Rigidbody stress/soak consumer. The public API and bake schema are still pre-1.0. Intra-request job fan-out, full-route allocation guarantees, global-search refinement, broad editor polish, schema evolution, and post-1.0 backends remain deferred.
 
 ## Documentation
 
@@ -10,7 +10,7 @@ Version 0.2 proves real Unity persistence and domain reload, all current validat
 - [Authoring and baking](authoring.md): semantic registry, Areas, Portals, polygons, adjacency, validation, and editor workflow.
 - [Runtime and pathfinding](runtime.md): compiled data, policy, global and local routing, requests, revisions, and results.
 - [Semantic mask layout](semantic-mask-layout.md): benchmark method, recorded result, and the current fixed-stride decision.
-- [Performance baseline](performance-baseline.md): repeatable route benchmark method and the 0.2 reference result.
+- [Performance baseline](performance-baseline.md): repeatable concurrency benchmark method and the 0.3 reference result.
 - [Migration](migration.md): staged evolution from the working NavMesh prototype to the polygon backend.
 - [Testing](testing.md): current smoke tests, required behavioral coverage, and acceptance gates.
 
