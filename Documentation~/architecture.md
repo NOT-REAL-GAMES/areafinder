@@ -2,7 +2,7 @@
 
 # Architecture
 
-This document defines the target Areafinder 1.0 architecture. Version 0.2 implements and characterizes the core authoring records, flat bake, polygon routing, policies, structured requests/results, revisions, caches, initial editor tooling, and Burst local-search job. Delivery-gate and 1.0 statements still describe acceptance work and must not be read as a stability promise.
+This document defines the target Areafinder 1.0 architecture. Version 0.3 implements and characterizes the core authoring records, flat bake, polygon routing, policies, structured requests/results, revisions, caches, initial editor tooling, and bounded concurrent Burst local-search jobs. Delivery-gate and 1.0 statements still describe acceptance work and must not be read as a stability promise.
 
 ## System model
 
@@ -32,7 +32,7 @@ Version 1.0 requires manual topology authoring. Any future generator is optional
 - **Global versus local routing:** global search chooses Areas and Portals. Local search finds a route between locations or Portal sides inside one Area.
 - **Pathfinding versus locomotion:** Areafinder returns corridors, transitions, and optional steering targets. It neither moves agents nor requires exact intermediate waypoint arrival.
 - **Authoring versus runtime:** Unity objects are convenient source data. Baking converts them to deterministic flat data, and searches never walk `GameObject`, `MonoBehaviour`, `ScriptableObject`, or `List<T>` graphs.
-- **Correctness before optimization:** the compiled representation and managed behavior tests preceded the current Burst local-search job. Further batching and memory-layout changes remain gated by parity and allocation evidence.
+- **Correctness before optimization:** the compiled representation and managed behavior tests preceded the current bounded concurrent Burst local-search pipeline. Further intra-request fan-out and memory-layout changes remain gated by parity and allocation evidence.
 
 ## Canonical identities
 
@@ -44,7 +44,7 @@ The semantic registry uses stable 128-bit IDs and append-only integer slots. Ren
 
 A `NavigationWorldAsset` owns topology and references `NavigationAreaAsset` data. An explicit bake produces primitive arrays for Areas, polygons, vertices, adjacency, Portals, semantic words, and identity lookup. At runtime, a disposable non-singleton `NavigationWorld` owns the compiled view, mutable state, scheduler, revisions, caches, and result pools. An optional `NavigationWorldHost` component supplies Unity lifecycle integration.
 
-Each semantic mask addresses a range in contiguous `ulong` storage. The runtime does not allocate one managed array per polygon. Bake schema 1 uses fixed stride; the [semantic mask layout decision](semantic-mask-layout.md) records why neither trimmed pooling nor interning passed the cross-workload replacement gate. Version 0.2 preserves that schema and executes real baked routes in Windows Mono/Burst and IL2CPP/Burst players; schema changes still require separate evidence and migration planning before 1.0.
+Each semantic mask addresses a range in contiguous `ulong` storage. The runtime does not allocate one managed array per polygon. Bake schema 1 uses fixed stride; the [semantic mask layout decision](semantic-mask-layout.md) records why neither trimmed pooling nor interning passed the cross-workload replacement gate. Version 0.3 preserves that schema and executes real concurrent baked routes in Windows Mono/Burst and IL2CPP/Burst players; schema changes still require separate evidence and migration planning before 1.0.
 
 ## Version 1.0 boundary
 

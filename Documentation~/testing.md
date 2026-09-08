@@ -1,8 +1,8 @@
 # Testing and acceptance
 
-Tests are added with each implementation milestone. The 0.2 suite covers stable IDs and large-coordinate transforms; semantic boundaries, tombstones, restoration, and compaction; all 41 emitted validation codes and every configured tolerance boundary; deterministic AssetDatabase/domain-reload persistence and baking; policy eligibility/cost; local and three-Area routing; rigid bidirectional Portals; the complete current request lifecycle; direct cache behavior; managed/Burst parity; revisions and mutation; Undo refresh; editor settings; and sample setup.
+Tests are added with each implementation milestone. The 0.3 suite retains coverage for stable IDs and large-coordinate transforms; semantic boundaries, tombstones, restoration, and compaction; all 41 emitted validation codes and every configured tolerance boundary; deterministic AssetDatabase/domain-reload persistence and baking; policy eligibility/cost; local and three-Area routing; rigid bidirectional Portals; the complete request lifecycle; direct cache behavior; managed/Burst parity; revisions and mutation; Undo refresh; editor settings; and sample setup.
 
-Version 0.2 also builds and launches real Windows Mono/Burst and IL2CPP/Burst players and records repeatable route baselines. Concurrent job batches and snapshot ownership, full-route zero-allocation work, A*/optimistic global refinement, schema changes, broad editor UX, HORDE dogfooding, and post-1.0 backends remain deferred.
+Version 0.3 additionally characterizes bounded concurrent jobs, generation-safe physical work ownership, copy-on-write mutation snapshots, admission versus completion ordering, cancellation capacity, disposal fencing, and deterministic cap-one/cap-four parity. It builds and launches real Windows Mono/Burst and IL2CPP/Burst players, records concurrency baselines, and runs 72 seeded project-owned Rigidbody consumers in HORDE. Full-route allocation guarantees, A*/optimistic global refinement, intra-request job fan-out, schema changes, broad editor UX, and post-1.0 backends remain deferred.
 
 ## Run package tests
 
@@ -19,7 +19,7 @@ Use Unity `6000.7.0a6`. Install Areafinder into a disposable host project throug
 }
 ```
 
-Run both `NotRealGames.Areafinder.Editor.Tests` in Edit Mode and `NotRealGames.Areafinder.Tests` in Play Mode. `Tools~/Run-UnityTests.ps1` creates the disposable host, enforces discovery floors of 9 Edit Mode and 178 Play Mode cases, and validates its JSON benchmark report. Disposable hosts keep Unity-generated `Library`, `Logs`, `Temp`, and result artifacts outside the package repository.
+Run both `NotRealGames.Areafinder.Editor.Tests` in Edit Mode and `NotRealGames.Areafinder.Tests` in Play Mode. `Tools~/Run-UnityTests.ps1` creates the disposable host, enforces discovery floors of 9 Edit Mode and 191 Play Mode cases, and validates its JSON benchmark report. Disposable hosts keep Unity-generated `Library`, `Logs`, `Temp`, and result artifacts outside the package repository.
 
 ## Authoring and serialization
 
@@ -45,16 +45,19 @@ Run both `NotRealGames.Areafinder.Editor.Tests` in Edit Mode and `NotRealGames.A
 - Exercise every request state, FIFO ordering, weighted-priority fairness, batch submission, callback reentrancy, invalid handles, result release, and exactly-once main-thread publication.
 - Cancel queued and running requests and destroy an associated owner; no successful callback may arrive afterward.
 - Change a dependency during a running request and require `Stale` rather than silently publishing an authoritative result.
+- Prove that cancellation and logical release do not interrupt a physical job or free its lane, snapshot, or output before completion, even when the handle slot is reused.
+- Distinguish deterministic weighted-FIFO admission from physical completion order and compare cap-one/cap-four route contents and equal-cost choices.
+- Batch same-tick mutations into one snapshot, stale only dependent work, preserve unrelated-Area currentness, and fence every remaining job during world disposal.
 
 ## Jobs, Burst, players, and allocation
 
-The multi-polygon local kernel runs as a Burst job with persistent native input and scratch arrays. Managed-reference parity covers same-polygon, multi-polygon, unreachable, semantic-policy, runtime-mutation, and equal-cost-tie cases. After 32 warmups, 1,024 idle `Tick(0)` calls must allocate zero bytes according to `GC.GetAllocatedBytesForCurrentThread`. Full complete/retrieve/release cycles are recorded as baselines, not release thresholds and not zero-allocation guarantees.
+The local kernel runs as a Burst job with persistent native input and one scratch lane per effective concurrency slot. Managed-reference parity covers same-polygon, multi-polygon, unreachable, semantic-policy, runtime-mutation, and equal-cost-tie cases. After 32 warmups, 1,024 idle `Tick(0)` calls must allocate zero bytes according to `GC.GetAllocatedBytesForCurrentThread`. Full complete/retrieve/release cycles are recorded as baselines, not universal release thresholds and not zero-allocation guarantees.
 
-`Tools~/Run-UnityAotSmoke.ps1` creates a valid two-Area fixture, compiles a policy, builds both Windows backends, finds each native Burst artifact, launches each executable with a bounded timeout, and requires a backend-specific route-success marker. Missing IL2CPP support is a hard failure. `Tools~/Run-RoomToRoomSmoke.ps1` independently imports the package sample, runs its setup command, and executes its route.
+`Tools~/Run-UnityAotSmoke.ps1` creates a valid two-Area fixture, compiles a policy, submits concurrent routes, cancels and mutates while work is running, verifies stale and closed-Portal outcomes, reopens the Portal, and validates recovered corridor/Portal/guidance/currentness. It builds both Windows backends, finds each native Burst artifact, launches each executable with a bounded timeout, and requires a backend-specific success marker. Missing IL2CPP support is a hard failure. `Tools~/Run-RoomToRoomSmoke.ps1` independently imports the package sample, runs its setup command, and executes its route.
 
-The [route performance baseline](performance-baseline.md) records seven samples of 128 complete/retrieve/release cycles on a 16×16 same-Area grid and a three-Area/two-Portal fixture with 8×8 grids. The separate deterministic [semantic mask layout benchmark and decision](semantic-mask-layout.md) covers fixed-stride, trimmed pooled, and interned storage. Bake schema 1 retains fixed stride.
+The [route performance baseline](performance-baseline.md) records seven samples of 128 complete/retrieve/release cycles at requested caps one and four on a 32×32 same-Area grid and a three-Area/two-Portal fixture with 16×16 grids. On the named Ryzen 9 7900X reference host, the same-Area cap-four median must be at least 1.5 times cap one when four workers are available. The separate deterministic [semantic mask layout benchmark and decision](semantic-mask-layout.md) covers fixed-stride, trimmed pooled, and interned storage. Bake schema 1 retains fixed stride.
 
-The 0.2 local gate is:
+The 0.3 local gate is:
 
 ```powershell
 ./Tools~/Test-PackageStructure.ps1
@@ -63,8 +66,12 @@ The 0.2 local gate is:
 ./Tools~/Run-UnityAotSmoke.ps1 -Backends Mono,IL2CPP
 ```
 
-GitHub Actions intentionally runs only the static package-structure check. A public release additionally requires that hosted check to start and pass.
+GitHub Actions remains a static package-structure signal. For 0.3, the complete disposable-host local gate is authoritative and publication is not blocked by hosted workflow state.
 
-## Deferred manual 1.0 acceptance
+## HORDE dogfood and deferred 1.0 acceptance
 
-In HORDE, author two rooms from scratch, inspect inferred and overridden adjacency, attach an authored Portal, assign policies that choose different routes, bake, issue concurrent Rigidbody-enemy requests, cancel and stale requests safely, and traverse using steering guidance without exact waypoint arrival. Run the final automated host without AI Navigation and confirm the package source contains no NavMesh or High Precision dependency.
+The 0.3 HORDE gate runs 72 agents against a multi-Area fixture, exercises mixed priorities and policies, staggered and simultaneous submissions, cancellation and immediate handle reuse, dependency staleness, Portal closure, reopening, replanning, agent destruction/respawn, and guidance traversal, then requires every project-owned kinematic Rigidbody consumer to recover. The host runs without AI Navigation, and static checks reject NavMesh or High Precision dependencies in package source.
+
+The longer diagnostic soak continuously moves and replans agents with deterministic seeded randomness, periodically mutates topology, cancels requests, destroys and respawns owners, and checks bounded native/managed memory and completion latency. Reproducible leaks or lifetime corruption block release, but this messy-gameplay gate is deliberately separate from the synthetic numerical benchmark.
+
+Broader manual acceptance before 1.0 still includes authoring production scenes from scratch, inspecting inferred and overridden adjacency, comparing materially different policies, and validating locomotion-specific guidance consumption under real gameplay load. Movement, collisions, steering decisions, crowd behavior, avoidance, and replanning policy stay in HORDE or another consuming project.

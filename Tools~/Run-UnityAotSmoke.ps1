@@ -98,6 +98,12 @@ function Invoke-PlayerProof {
 
     $result = Get-Content -Raw -LiteralPath $marker | ConvertFrom-Json
     if (-not $result.success -or $result.backend -ne $Backend -or
+        [int]$result.peakInFlight -lt 2 -or [int]$result.effectiveConcurrency -lt 2 -or
+        -not $result.cancelRetainedCapacity -or [int]$result.finalInFlight -ne 0 -or
+        [int]$result.finalInUseLanes -ne 0 -or [int]$result.finalActiveSnapshots -ne 1 -or
+        [int]$result.finalSnapshotReferences -ne 1 -or [int]$result.allocatedRequestSlots -ne 64 -or
+        [int]$result.stale -lt 1 -or [int]$result.cancelled -lt 1 -or
+        [int]$result.unreachable -ne 16 -or [int]$result.completed -ne 64 -or
         [int]$result.areaCount -ne 2 -or [int]$result.portalCount -ne 1 -or
         [int]$result.polygonCount -lt 4 -or [int]$result.crossingCount -lt 2 -or
         [int]$result.steeringCount -lt 2 -or -not $result.current) {
@@ -127,11 +133,31 @@ using UnityEngine;
 
 public sealed class AreafinderAotProbe : MonoBehaviour
 {
+    private enum Phase : byte
+    {
+        Initial,
+        Closed,
+        ReopenQueued,
+        Recovery
+    }
+
     [Serializable]
     private sealed class ProbeResult
     {
         public bool success;
         public string backend;
+        public int peakInFlight;
+        public int effectiveConcurrency;
+        public bool cancelRetainedCapacity;
+        public int finalInFlight;
+        public int finalInUseLanes;
+        public int finalActiveSnapshots;
+        public int finalSnapshotReferences;
+        public int allocatedRequestSlots;
+        public int stale;
+        public int cancelled;
+        public int unreachable;
+        public int completed;
         public int areaCount;
         public int portalCount;
         public int polygonCount;
@@ -143,6 +169,7 @@ public sealed class AreafinderAotProbe : MonoBehaviour
 
     [SerializeField] private NavigationBakeAsset _bake;
     [SerializeField] private TraversalPolicyAsset _policy;
+    [SerializeField] private PortalId _portal;
     [SerializeField] private AreaId _startArea;
     [SerializeField] private AreaId _goalArea;
     [SerializeField] private Vector3 _start;
@@ -150,13 +177,30 @@ public sealed class AreafinderAotProbe : MonoBehaviour
     [SerializeField] private string _backend;
 
     private NavigationWorld _world;
-    private PathRequestHandle _request;
+    private CompiledTraversalPolicy _compiledPolicy;
+    private PathRequestHandle[] _requests;
+    private Phase _phase;
     private int _frames;
+    private int _peakInFlight;
+    private int _stale;
+    private int _cancelled;
+    private int _unreachable;
+    private int _completed;
+    private int _reopenFrame;
+    private bool _mutationQueued;
+    private bool _cancelRetainedCapacity;
+    private bool _current = true;
+    private int _areaCount;
+    private int _portalCount;
+    private int _polygonCount;
+    private int _crossingCount;
+    private int _steeringCount;
     private bool _finished;
 
     public void Configure(
         NavigationBakeAsset bake,
         TraversalPolicyAsset policy,
+        PortalId portal,
         AreaId startArea,
         AreaId goalArea,
         Vector3 start,
@@ -165,6 +209,7 @@ public sealed class AreafinderAotProbe : MonoBehaviour
     {
         _bake = bake;
         _policy = policy;
+        _portal = portal;
         _startArea = startArea;
         _goalArea = goalArea;
         _start = start;
@@ -183,17 +228,18 @@ public sealed class AreafinderAotProbe : MonoBehaviour
                 return;
             }
 
-            if (!CompiledTraversalPolicy.TryCompile(_policy, _bake, out CompiledTraversalPolicy policy, out string error))
+            if (!CompiledTraversalPolicy.TryCompile(
+                    _policy,
+                    _bake,
+                    out _compiledPolicy,
+                    out string error))
             {
                 Fail("Policy compilation failed: " + error);
                 return;
             }
 
-            _world = new NavigationWorld(_bake);
-            _request = _world.Submit(new PathQuery(
-                new NavigationLocation(_startArea, _start),
-                new NavigationLocation(_goalArea, _goal),
-                policy));
+            _world = new NavigationWorld(_bake, 256, 4);
+            _requests = SubmitCrossArea(64);
         }
         catch (Exception exception)
         {
@@ -210,43 +256,130 @@ public sealed class AreafinderAotProbe : MonoBehaviour
 
         try
         {
-            if (++_frames > 300)
+            if (++_frames > 1200)
             {
-                Fail("The request did not finish within 300 frames.");
+                Fail("The concurrent request proof did not finish within 1,200 frames.");
                 return;
             }
 
             _world.Tick(64);
-            PathRequestStatus status = _world.GetStatus(_request);
-            if (status == PathRequestStatus.Completed)
+            _peakInFlight = Math.Max(_peakInFlight, _world.InFlightSearchCount);
+            if (_world.InFlightSearchCount > _world.EffectiveMaxConcurrentSearches ||
+                _world.InUseScratchLaneCount != _world.InFlightSearchCount)
             {
-                if (!_world.TryGetPath(_request, out NavigationPathView path))
-                {
-                    Fail("The completed request did not expose a path.");
-                    return;
-                }
-
-                var result = new ProbeResult
-                {
-                    success = path.IsValid && path.AreaCount == 2 && path.PortalTransitionCount == 1 &&
-                              path.PolygonCount >= 4 && path.CrossingSpanCount >= 2 &&
-                              path.SteeringTargetCount >= 2,
-                    backend = _backend,
-                    areaCount = path.AreaCount,
-                    portalCount = path.PortalTransitionCount,
-                    polygonCount = path.PolygonCount,
-                    crossingCount = path.CrossingSpanCount,
-                    steeringCount = path.SteeringTargetCount,
-                    current = _world.IsCurrent(path)
-                };
-                result.success &= result.current;
-                WriteResultAndQuit(result, result.success ? 0 : 1);
+                Fail("The physical work and scratch-lane counts diverged or exceeded the cap.");
+                return;
             }
-            else if (status == PathRequestStatus.Failed || status == PathRequestStatus.Cancelled ||
-                     status == PathRequestStatus.Stale || status == PathRequestStatus.Invalid)
+
+            switch (_phase)
             {
-                _world.TryGetFailure(_request, out PathFailureReason failure);
-                Fail("The request terminated as " + status + "/" + failure + ".");
+                case Phase.Initial:
+                    if (!_mutationQueued && _world.InFlightSearchCount >= 2)
+                    {
+                        int cancelledIndex = -1;
+                        for (int index = 0; index < _requests.Length; index++)
+                        {
+                            if (_requests[index].IsValid && _world.IsPhysicalWorkInFlight(_requests[index]))
+                            {
+                                cancelledIndex = index;
+                                break;
+                            }
+                        }
+
+                        if (cancelledIndex < 0)
+                        {
+                            Fail("No generation-safe physical request was available for cancellation.");
+                            return;
+                        }
+
+                        int occupiedBeforeCancel = _world.InFlightSearchCount;
+                        _world.Cancel(_requests[cancelledIndex]);
+                        _world.SetPortalEnabled(_portal, false);
+                        _world.Tick(0);
+                        _cancelRetainedCapacity = _world.InFlightSearchCount == occupiedBeforeCancel &&
+                                                  _world.IsPhysicalWorkInFlight(_requests[cancelledIndex]);
+                        _mutationQueued = true;
+                    }
+
+                    DrainInitial();
+                    if (_mutationQueued && AllReleased())
+                    {
+                        if (_peakInFlight < 2 || _cancelled < 1 || _stale < 1)
+                        {
+                            Fail("The initial batch did not prove concurrent cancellation and staleness.");
+                            return;
+                        }
+
+                        _requests = SubmitCrossArea(16);
+                        _phase = Phase.Closed;
+                    }
+
+                    break;
+
+                case Phase.Closed:
+                    DrainClosed();
+                    if (AllReleased())
+                    {
+                        if (_unreachable != 16)
+                        {
+                            Fail("The disabled Portal did not make all closed-phase routes unreachable.");
+                            return;
+                        }
+
+                        _world.SetPortalEnabled(_portal, true);
+                        _reopenFrame = _frames;
+                        _phase = Phase.ReopenQueued;
+                    }
+
+                    break;
+
+                case Phase.ReopenQueued:
+                    if (_frames > _reopenFrame)
+                    {
+                        _requests = SubmitMixed(64);
+                        _phase = Phase.Recovery;
+                    }
+
+                    break;
+
+                case Phase.Recovery:
+                    DrainRecovery();
+                    if (AllReleased() && _world.InFlightSearchCount == 0)
+                    {
+                        bool success = _completed == 64 && _current && _areaCount == 2 &&
+                                       _portalCount == 1 && _polygonCount >= 4 &&
+                                       _crossingCount >= 2 && _steeringCount >= 2 &&
+                                       _cancelRetainedCapacity && _world.InUseScratchLaneCount == 0 &&
+                                       _world.ActiveSnapshotCount == 1 &&
+                                       _world.CurrentSnapshotReferenceCount == 1;
+                        var result = new ProbeResult
+                        {
+                            success = success,
+                            backend = _backend,
+                            peakInFlight = _peakInFlight,
+                            effectiveConcurrency = _world.EffectiveMaxConcurrentSearches,
+                            cancelRetainedCapacity = _cancelRetainedCapacity,
+                            finalInFlight = _world.InFlightSearchCount,
+                            finalInUseLanes = _world.InUseScratchLaneCount,
+                            finalActiveSnapshots = _world.ActiveSnapshotCount,
+                            finalSnapshotReferences = _world.CurrentSnapshotReferenceCount,
+                            allocatedRequestSlots = _world.AllocatedRequestSlotCount,
+                            stale = _stale,
+                            cancelled = _cancelled,
+                            unreachable = _unreachable,
+                            completed = _completed,
+                            areaCount = _areaCount,
+                            portalCount = _portalCount,
+                            polygonCount = _polygonCount,
+                            crossingCount = _crossingCount,
+                            steeringCount = _steeringCount,
+                            current = _current,
+                            error = success ? null : "The recovery batch returned invalid route evidence."
+                        };
+                        WriteResultAndQuit(result, success ? 0 : 1);
+                    }
+
+                    break;
             }
         }
         catch (Exception exception)
@@ -255,12 +388,204 @@ public sealed class AreafinderAotProbe : MonoBehaviour
         }
     }
 
+    private PathRequestHandle[] SubmitCrossArea(int count)
+    {
+        var queries = new PathQuery[count];
+        for (int index = 0; index < count; index++)
+        {
+            queries[index] = new PathQuery(
+                new NavigationLocation(_startArea, _start),
+                new NavigationLocation(_goalArea, _goal),
+                _compiledPolicy);
+        }
+
+        return _world.SubmitBatch(queries);
+    }
+
+    private PathRequestHandle[] SubmitMixed(int count)
+    {
+        var queries = new PathQuery[count];
+        for (int index = 0; index < count; index++)
+        {
+            NavigationLocation start;
+            NavigationLocation goal;
+            if (index % 3 == 1)
+            {
+                start = new NavigationLocation(_goalArea, _goal);
+                goal = new NavigationLocation(_startArea, _start);
+            }
+            else if (index % 3 == 2)
+            {
+                start = new NavigationLocation(_startArea, _start);
+                goal = new NavigationLocation(_startArea, _goal);
+            }
+            else
+            {
+                start = new NavigationLocation(_startArea, _start);
+                goal = new NavigationLocation(_goalArea, _goal);
+            }
+
+            queries[index] = new PathQuery(start, goal, _compiledPolicy);
+        }
+
+        return _world.SubmitBatch(queries);
+    }
+
+    private void DrainInitial()
+    {
+        for (int index = 0; index < _requests.Length; index++)
+        {
+            PathRequestHandle handle = _requests[index];
+            if (!handle.IsValid)
+            {
+                continue;
+            }
+
+            PathRequestStatus status = _world.GetStatus(handle);
+            if (status == PathRequestStatus.Stale)
+            {
+                _stale++;
+            }
+            else if (status == PathRequestStatus.Cancelled)
+            {
+                _cancelled++;
+            }
+            else if (status == PathRequestStatus.Failed)
+            {
+                _world.TryGetFailure(handle, out PathFailureReason failure);
+                if (failure != PathFailureReason.NoGlobalRoute)
+                {
+                    Fail("Unexpected initial failure: " + failure);
+                    return;
+                }
+            }
+            else if (status != PathRequestStatus.Completed)
+            {
+                continue;
+            }
+            else
+            {
+                Fail("The pre-mutation batch published a current result after its Portal changed.");
+                return;
+            }
+
+            _world.Release(handle);
+            _requests[index] = default;
+        }
+    }
+
+    private void DrainClosed()
+    {
+        for (int index = 0; index < _requests.Length; index++)
+        {
+            PathRequestHandle handle = _requests[index];
+            if (!handle.IsValid)
+            {
+                continue;
+            }
+
+            PathRequestStatus status = _world.GetStatus(handle);
+            if (status == PathRequestStatus.Failed)
+            {
+                _world.TryGetFailure(handle, out PathFailureReason failure);
+                if (failure != PathFailureReason.NoGlobalRoute)
+                {
+                    Fail("Unexpected closed-phase failure: " + failure);
+                    return;
+                }
+
+                _unreachable++;
+                _world.Release(handle);
+                _requests[index] = default;
+            }
+            else if (status == PathRequestStatus.Completed || status == PathRequestStatus.Stale ||
+                     status == PathRequestStatus.Cancelled || status == PathRequestStatus.Invalid)
+            {
+                Fail("The disabled Portal produced an unexpected terminal state: " + status);
+                return;
+            }
+        }
+    }
+
+    private void DrainRecovery()
+    {
+        for (int index = 0; index < _requests.Length; index++)
+        {
+            PathRequestHandle handle = _requests[index];
+            if (!handle.IsValid)
+            {
+                continue;
+            }
+
+            PathRequestStatus status = _world.GetStatus(handle);
+            if (status == PathRequestStatus.Completed)
+            {
+                if (!_world.TryGetPath(handle, out NavigationPathView path) || !_world.IsCurrent(path))
+                {
+                    Fail("A completed recovery route was missing or stale.");
+                    return;
+                }
+
+                bool crossArea = index % 3 != 2;
+                if ((crossArea && (path.AreaCount != 2 || path.PortalTransitionCount != 1 ||
+                                   path.PolygonCount < 4 || path.CrossingSpanCount < 2)) ||
+                    (!crossArea && (path.AreaCount != 1 || path.PortalTransitionCount != 0 ||
+                                    path.PolygonCount < 2 || path.CrossingSpanCount < 1)) ||
+                    path.SteeringTargetCount < 1)
+                {
+                    Fail("A recovery route had an invalid corridor or guidance shape.");
+                    return;
+                }
+
+                if (crossArea && _areaCount == 0)
+                {
+                    _areaCount = path.AreaCount;
+                    _portalCount = path.PortalTransitionCount;
+                    _polygonCount = path.PolygonCount;
+                    _crossingCount = path.CrossingSpanCount;
+                    _steeringCount = path.SteeringTargetCount;
+                    _current = _world.IsCurrent(path);
+                }
+
+                _completed++;
+                _world.Release(handle);
+                _requests[index] = default;
+            }
+            else if (status == PathRequestStatus.Failed || status == PathRequestStatus.Stale ||
+                     status == PathRequestStatus.Cancelled || status == PathRequestStatus.Invalid)
+            {
+                _world.TryGetFailure(handle, out PathFailureReason failure);
+                Fail("Recovery request terminated as " + status + "/" + failure + ".");
+                return;
+            }
+        }
+    }
+
+    private bool AllReleased()
+    {
+        for (int index = 0; index < _requests.Length; index++)
+        {
+            if (_requests[index].IsValid)
+            {
+                return false;
+            }
+        }
+
+        return true;
+    }
+
     private void Fail(string error)
     {
         WriteResultAndQuit(new ProbeResult
         {
             success = false,
             backend = _backend,
+            peakInFlight = _peakInFlight,
+            effectiveConcurrency = _world != null ? _world.EffectiveMaxConcurrentSearches : 0,
+            stale = _stale,
+            cancelled = _cancelled,
+            unreachable = _unreachable,
+            completed = _completed,
             error = error
         }, 1);
     }
@@ -302,6 +627,40 @@ public sealed class AreafinderAotProbe : MonoBehaviour
     [IO.File]::WriteAllText(
         (Join-Path $assetsPath 'AreafinderAotProbe.cs'),
         $probeSource,
+        [Text.UTF8Encoding]::new($false))
+
+    $probeAssembly = @'
+{
+  "name": "NotRealGames.Areafinder.Probes",
+  "rootNamespace": "",
+  "references": [
+    "NotRealGames.Areafinder"
+  ],
+  "autoReferenced": true
+}
+'@
+    [IO.File]::WriteAllText(
+        (Join-Path $assetsPath 'NotRealGames.Areafinder.Probes.asmdef'),
+        $probeAssembly,
+        [Text.UTF8Encoding]::new($false))
+
+    $buildAssembly = @'
+{
+  "name": "NotRealGames.Areafinder.Probes.Editor",
+  "rootNamespace": "",
+  "references": [
+    "NotRealGames.Areafinder",
+    "NotRealGames.Areafinder.Probes"
+  ],
+  "includePlatforms": [
+    "Editor"
+  ],
+  "autoReferenced": true
+}
+'@
+    [IO.File]::WriteAllText(
+        (Join-Path $editorPath 'NotRealGames.Areafinder.Probes.Editor.asmdef'),
+        $buildAssembly,
         [Text.UTF8Encoding]::new($false))
 
     $buildSource = @'
@@ -352,7 +711,7 @@ public static class AreafinderAotBuild
         Invoke(world, "AddArea", firstArea);
         Invoke(world, "AddArea", secondArea);
         Invoke(world, "AddPolicy", policy);
-        Invoke(world, "AddPortal",
+        NavigationPortalRecord portal = (NavigationPortalRecord)Invoke(world, "AddPortal",
             Span(firstArea, firstExit, 2),
             Span(secondArea, secondEntry, 0),
             PortalDirection.Bidirectional,
@@ -370,6 +729,7 @@ public static class AreafinderAotBuild
         probe.Configure(
             bake,
             policy,
+            portal.Id,
             firstArea.Id,
             secondArea.Id,
             new Vector3(0.25f, 0f, 0.5f),

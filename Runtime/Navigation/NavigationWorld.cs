@@ -1,5 +1,7 @@
 using System;
 using System.Collections.Generic;
+using Unity.Jobs;
+using Unity.Jobs.LowLevel.Unsafe;
 using UnityEngine;
 
 namespace NotRealGames.Areafinder
@@ -30,8 +32,18 @@ namespace NotRealGames.Areafinder
             internal PathFailureReason PendingFailure;
             internal PathResultData PendingResult;
             internal PathResultData Result;
-            internal ulong[] CapturedAreaRevisions;
-            internal ulong CapturedTopologyRevision;
+            internal NavigationSearch.State Search;
+            internal bool LocalSearchPending;
+            internal long PhysicalWorkId;
+        }
+
+        private sealed class InFlightSearch
+        {
+            internal long Id;
+            internal long AdmissionSequence;
+            internal int LaneIndex;
+            internal PathRequestHandle OriginHandle;
+            internal NavigationSearch.State Search;
         }
 
         private enum MutationKind : byte
@@ -68,16 +80,62 @@ namespace NotRealGames.Areafinder
             new Queue<PathRequestHandle>()
         };
         private readonly Queue<PendingMutation> _mutations = new Queue<PendingMutation>();
+        private readonly InFlightSearch[] _inFlight;
         private int _serviceCursor;
+        private int _inFlightSearchCount;
+        private long _nextPhysicalWorkId;
+        private long _nextAdmissionSequence;
         private long _tick;
         private bool _disposed;
 
         public NavigationWorld(NavigationBakeAsset bake, int cacheCapacityPerArea = 256)
+            : this(bake, cacheCapacityPerArea, 4)
         {
-            _data = new NavigationRuntimeData(bake, cacheCapacityPerArea);
+        }
+
+        public NavigationWorld(
+            NavigationBakeAsset bake,
+            int cacheCapacityPerArea,
+            int maxConcurrentSearches)
+        {
+            if (maxConcurrentSearches < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxConcurrentSearches));
+            }
+
+            EffectiveMaxConcurrentSearches = Math.Min(
+                maxConcurrentSearches,
+                Math.Max(1, JobsUtility.JobWorkerCount));
+            _data = new NavigationRuntimeData(
+                bake,
+                cacheCapacityPerArea,
+                EffectiveMaxConcurrentSearches);
+            _inFlight = new InFlightSearch[EffectiveMaxConcurrentSearches];
         }
 
         public bool IsDisposed => _disposed;
+        public int EffectiveMaxConcurrentSearches { get; }
+        internal int InFlightSearchCount => _inFlightSearchCount;
+        internal int InUseScratchLaneCount => _data.PolygonSearch.InUseLaneCount;
+        internal int ActiveSnapshotCount => _data.ActiveSnapshotCount;
+        internal int CurrentSnapshotReferenceCount => _data.CurrentSnapshot.ReferenceCount;
+        internal int AllocatedRequestSlotCount => _slots.Count;
+        internal bool IsPhysicalWorkInFlight(PathRequestHandle handle)
+        {
+            for (int index = 0; index < _inFlight.Length; index++)
+            {
+                InFlightSearch physical = _inFlight[index];
+                if (physical != null &&
+                    physical.OriginHandle.Slot == handle.Slot &&
+                    physical.OriginHandle.Generation == handle.Generation)
+                {
+                    return true;
+                }
+            }
+
+            return false;
+        }
+
         public ulong TopologyRevision
         {
             get
@@ -179,6 +237,10 @@ namespace NotRealGames.Areafinder
                 return false;
             }
 
+            slot.Search?.Dispose();
+            slot.Search = null;
+            slot.LocalSearchPending = false;
+
             slot.Status = PathRequestStatus.Cancelled;
             ScheduleTerminal(slot, PathRequestStatus.Cancelled, PathFailureReason.None, null);
             return true;
@@ -197,7 +259,10 @@ namespace NotRealGames.Areafinder
             slot.Callback = null;
             slot.Result = null;
             slot.PendingResult = null;
-            slot.CapturedAreaRevisions = null;
+            slot.Search?.Dispose();
+            slot.Search = null;
+            slot.LocalSearchPending = false;
+            slot.PhysicalWorkId = 0L;
             _freeSlots.Push(handle.Slot);
             return true;
         }
@@ -217,14 +282,36 @@ namespace NotRealGames.Areafinder
 
             ApplyPendingMutations();
             PublishReadyRequests();
-            for (int work = 0; work < workBudget; work++)
+            if (workBudget == 0)
+            {
+                return;
+            }
+
+            bool scheduledJobs = false;
+            int work = 0;
+            while (work < workBudget && TryHarvestCompletedSearch())
+            {
+                work++;
+            }
+
+            while (work < workBudget)
             {
                 if (!TryDequeueWork(out PathRequestHandle handle))
                 {
                     break;
                 }
 
-                AdvanceRequest(handle);
+                if (!AdvanceRequest(handle, ref scheduledJobs))
+                {
+                    break;
+                }
+
+                work++;
+            }
+
+            if (scheduledJobs)
+            {
+                JobHandle.ScheduleBatchedJobs();
             }
         }
 
@@ -340,9 +427,36 @@ namespace NotRealGames.Areafinder
             }
 
             _disposed = true;
+            for (int index = 0; index < _inFlight.Length; index++)
+            {
+                InFlightSearch active = _inFlight[index];
+                if (active == null)
+                {
+                    continue;
+                }
+
+                try
+                {
+                    _data.PolygonSearch.Complete(active.LaneIndex, out _);
+                }
+                catch (Exception exception)
+                {
+                    Debug.LogException(exception);
+                }
+                finally
+                {
+                    _data.PolygonSearch.Release(active.LaneIndex);
+                    active.Search.Dispose();
+                    _inFlight[index] = null;
+                }
+            }
+
+            _inFlightSearchCount = 0;
             for (int index = 0; index < _slots.Count; index++)
             {
                 RequestSlot slot = _slots[index];
+                slot.Search?.Dispose();
+                slot.Search = null;
                 slot.Callback = null;
                 slot.Result = null;
                 slot.PendingResult = null;
@@ -419,7 +533,9 @@ namespace NotRealGames.Areafinder
             slot.CallbackPending = false;
             slot.PendingResult = null;
             slot.Result = null;
-            slot.CapturedAreaRevisions = null;
+            slot.Search = null;
+            slot.LocalSearchPending = false;
+            slot.PhysicalWorkId = 0L;
             return index;
         }
 
@@ -447,8 +563,9 @@ namespace NotRealGames.Areafinder
                     PathRequestHandle candidate = queue.Dequeue();
                     if (TryGetSlot(candidate, out RequestSlot slot) &&
                         (slot.Status == PathRequestStatus.Queued ||
-                         slot.Status == PathRequestStatus.RunningGlobal ||
-                         slot.Status == PathRequestStatus.RunningLocal))
+                         ((slot.Status == PathRequestStatus.RunningGlobal ||
+                           slot.Status == PathRequestStatus.RunningLocal) &&
+                          slot.Search != null)))
                     {
                         handle = candidate;
                         return true;
@@ -460,50 +577,233 @@ namespace NotRealGames.Areafinder
             return false;
         }
 
-        private void AdvanceRequest(PathRequestHandle handle)
+        private bool AdvanceRequest(PathRequestHandle handle, ref bool scheduledJobs)
         {
             RequestSlot slot = _slots[handle.Slot];
             switch (slot.Status)
             {
                 case PathRequestStatus.Queued:
-                    slot.CapturedAreaRevisions = (ulong[])_data.AreaRevisions.Clone();
-                    slot.CapturedTopologyRevision = _data.TopologyRevision;
+                    NavigationRuntimeSnapshot snapshot = _data.AcquireCurrentSnapshot();
+                    if (!NavigationSearch.State.TryCreate(
+                            _data,
+                            snapshot,
+                            slot.Query,
+                            out NavigationSearch.State search,
+                            out PathFailureReason createFailure))
+                    {
+                        snapshot.Release();
+                        ScheduleTerminal(slot, PathRequestStatus.Failed, createFailure, null);
+                        return true;
+                    }
+
+                    slot.Search = search;
                     slot.Status = PathRequestStatus.RunningGlobal;
                     EnqueueActive(handle, slot.Query.Priority);
-                    break;
+                    return true;
 
                 case PathRequestStatus.RunningGlobal:
-                    slot.Status = PathRequestStatus.RunningLocal;
-                    EnqueueActive(handle, slot.Query.Priority);
-                    break;
-
                 case PathRequestStatus.RunningLocal:
-                    bool solved = NavigationSearch.TrySolve(
-                        _data,
-                        slot.Query,
-                        slot.CapturedAreaRevisions,
-                        slot.CapturedTopologyRevision,
-                        out PathResultData result,
-                        out PathFailureReason failure);
-                    if (solved && !IsCurrent(result))
-                    {
-                        ScheduleTerminal(slot, PathRequestStatus.Stale, PathFailureReason.None, null);
-                    }
-                    else if (solved)
-                    {
-                        ScheduleTerminal(slot, PathRequestStatus.Completed, PathFailureReason.None, result);
-                    }
-                    else if (CapturedStateChanged(slot))
+                    return AdvanceSearch(handle, slot, ref scheduledJobs);
+            }
+
+            return true;
+        }
+
+        private bool AdvanceSearch(
+            PathRequestHandle handle,
+            RequestSlot slot,
+            ref bool scheduledJobs)
+        {
+            if (slot.LocalSearchPending)
+            {
+                return TryScheduleLocalSearch(handle, slot, ref scheduledJobs);
+            }
+
+            SearchAdvanceStatus advance = slot.Search.Advance(
+                out PathResultData result,
+                out PathFailureReason failure);
+            switch (advance)
+            {
+                case SearchAdvanceStatus.Continue:
+                    EnqueueActive(handle, slot.Query.Priority);
+                    return true;
+
+                case SearchAdvanceStatus.NeedsLocalSearch:
+                    slot.LocalSearchPending = true;
+                    return TryScheduleLocalSearch(handle, slot, ref scheduledJobs);
+
+                case SearchAdvanceStatus.Completed:
+                    slot.Search.Dispose();
+                    slot.Search = null;
+                    if (!IsCurrent(result))
                     {
                         ScheduleTerminal(slot, PathRequestStatus.Stale, PathFailureReason.None, null);
                     }
                     else
                     {
-                        ScheduleTerminal(slot, PathRequestStatus.Failed, failure, null);
+                        ScheduleTerminal(slot, PathRequestStatus.Completed, PathFailureReason.None, result);
                     }
 
-                    break;
+                    return true;
+
+                case SearchAdvanceStatus.Failed:
+                    bool stale = slot.Search.CapturedStateChanged();
+                    slot.Search.Dispose();
+                    slot.Search = null;
+                    ScheduleTerminal(
+                        slot,
+                        stale ? PathRequestStatus.Stale : PathRequestStatus.Failed,
+                        stale ? PathFailureReason.None : failure,
+                        null);
+                    return true;
+
+                default:
+                    throw new InvalidOperationException("The navigation search returned an invalid status.");
             }
+        }
+
+        private bool TryScheduleLocalSearch(
+            PathRequestHandle handle,
+            RequestSlot slot,
+            ref bool scheduledJobs)
+        {
+            int scheduledLane = -1;
+            try
+            {
+                if (!_data.PolygonSearch.TrySchedule(
+                        slot.Search.PendingLocalSearch,
+                        out int laneIndex))
+                {
+                    EnqueueActive(handle, slot.Query.Priority);
+                    return false;
+                }
+
+                scheduledLane = laneIndex;
+                long workId = NextPositive(ref _nextPhysicalWorkId);
+                var physical = new InFlightSearch
+                {
+                    Id = workId,
+                    AdmissionSequence = NextPositive(ref _nextAdmissionSequence),
+                    LaneIndex = laneIndex,
+                    OriginHandle = handle,
+                    Search = slot.Search
+                };
+                if (_inFlight[laneIndex] != null)
+                {
+                    throw new InvalidOperationException("A Burst scratch lane was admitted twice.");
+                }
+
+                _inFlight[laneIndex] = physical;
+                scheduledLane = -1;
+                _inFlightSearchCount++;
+                slot.Search = null;
+                slot.LocalSearchPending = false;
+                slot.PhysicalWorkId = workId;
+                slot.Status = PathRequestStatus.RunningLocal;
+                scheduledJobs = true;
+                return true;
+            }
+            catch (Exception exception)
+            {
+                Debug.LogException(exception);
+                if (scheduledLane >= 0)
+                {
+                    try
+                    {
+                        _data.PolygonSearch.Complete(scheduledLane, out _);
+                    }
+                    catch (Exception completionException)
+                    {
+                        Debug.LogException(completionException);
+                    }
+                    finally
+                    {
+                        _data.PolygonSearch.Release(scheduledLane);
+                    }
+                }
+
+                slot.Search?.Dispose();
+                slot.Search = null;
+                slot.LocalSearchPending = false;
+                slot.PhysicalWorkId = 0L;
+                ScheduleTerminal(
+                    slot,
+                    PathRequestStatus.Failed,
+                    PathFailureReason.BackendUnavailable,
+                    null);
+                return true;
+            }
+        }
+
+        private bool TryHarvestCompletedSearch()
+        {
+            InFlightSearch next = null;
+            for (int index = 0; index < _inFlight.Length; index++)
+            {
+                InFlightSearch candidate = _inFlight[index];
+                if (candidate == null || !_data.PolygonSearch.IsCompleted(candidate.LaneIndex))
+                {
+                    continue;
+                }
+
+                if (next == null || candidate.AdmissionSequence < next.AdmissionSequence)
+                {
+                    next = candidate;
+                }
+            }
+
+            if (next == null)
+            {
+                return false;
+            }
+
+            HarvestCompletedSearch(next);
+            return true;
+        }
+
+        private void HarvestCompletedSearch(InFlightSearch physical)
+        {
+            Exception error = null;
+            try
+            {
+                bool found = _data.PolygonSearch.Complete(physical.LaneIndex, out double totalCost);
+                physical.Search.CompleteLocal(_data.PolygonSearch, physical.LaneIndex, found, totalCost);
+            }
+            catch (Exception exception)
+            {
+                error = exception;
+                Debug.LogException(exception);
+            }
+            finally
+            {
+                _data.PolygonSearch.Release(physical.LaneIndex);
+                _inFlight[physical.LaneIndex] = null;
+                _inFlightSearchCount--;
+            }
+
+            if (TryGetSlot(physical.OriginHandle, out RequestSlot slot) &&
+                slot.Status == PathRequestStatus.RunningLocal &&
+                slot.PhysicalWorkId == physical.Id)
+            {
+                slot.PhysicalWorkId = 0L;
+                if (error == null)
+                {
+                    slot.Search = physical.Search;
+                    physical.Search = null;
+                    EnqueueActive(physical.OriginHandle, slot.Query.Priority);
+                }
+                else
+                {
+                    ScheduleTerminal(
+                        slot,
+                        PathRequestStatus.Failed,
+                        PathFailureReason.BackendUnavailable,
+                        null);
+                }
+            }
+
+            physical.Search?.Dispose();
+            physical.Search = null;
         }
 
         private void EnqueueActive(PathRequestHandle handle, PathPriority priority)
@@ -576,50 +876,83 @@ namespace NotRealGames.Areafinder
 
         private void ApplyPendingMutations()
         {
+            if (_mutations.Count == 0)
+            {
+                return;
+            }
+
+            var polygons = (bool[])_data.PolygonEnabled.Clone();
+            var adjacencies = (bool[])_data.AdjacencyEnabled.Clone();
+            var portals = (bool[])_data.PortalEnabled.Clone();
+            var affectedAreas = new bool[_data.Areas.Length];
+            bool changed = false;
+            bool topologyChanged = false;
             while (_mutations.Count > 0)
             {
                 PendingMutation mutation = _mutations.Dequeue();
                 switch (mutation.Kind)
                 {
                     case MutationKind.Polygon:
-                        if (_data.PolygonEnabled[mutation.First] != mutation.Enabled)
+                        if (polygons[mutation.First] != mutation.Enabled)
                         {
-                            _data.SetPolygonEnabled(mutation.First, mutation.Enabled);
-                            _data.AdvanceAreaRevision(_data.Polygons[mutation.First].AreaIndex);
+                            polygons[mutation.First] = mutation.Enabled;
+                            affectedAreas[_data.Polygons[mutation.First].AreaIndex] = true;
+                            changed = true;
                         }
 
                         break;
 
                     case MutationKind.Adjacency:
-                        bool changed = SetAdjacencyPair(mutation.First, mutation.Second, mutation.Enabled);
-                        changed |= SetAdjacencyPair(mutation.Second, mutation.First, mutation.Enabled);
-                        if (changed)
+                        bool adjacencyChanged = SetAdjacencyPair(
+                            adjacencies,
+                            mutation.First,
+                            mutation.Second,
+                            mutation.Enabled);
+                        adjacencyChanged |= SetAdjacencyPair(
+                            adjacencies,
+                            mutation.Second,
+                            mutation.First,
+                            mutation.Enabled);
+                        if (adjacencyChanged)
                         {
-                            _data.AdvanceAreaRevision(_data.Polygons[mutation.First].AreaIndex);
+                            affectedAreas[_data.Polygons[mutation.First].AreaIndex] = true;
+                            changed = true;
                         }
 
                         break;
 
                     case MutationKind.Portal:
-                        if (_data.PortalEnabled[mutation.First] != mutation.Enabled)
+                        if (portals[mutation.First] != mutation.Enabled)
                         {
-                            _data.PortalEnabled[mutation.First] = mutation.Enabled;
+                            portals[mutation.First] = mutation.Enabled;
                             CompiledPortalRecord portal = _data.Portals[mutation.First];
-                            _data.AdvanceAreaRevision(portal.SourceArea);
-                            _data.AdvanceAreaRevision(portal.DestinationArea);
-                            _data.AdvanceTopologyRevision();
+                            affectedAreas[portal.SourceArea] = true;
+                            affectedAreas[portal.DestinationArea] = true;
+                            topologyChanged = true;
+                            changed = true;
                         }
 
                         break;
 
                     case MutationKind.AreaDirty:
-                        _data.AdvanceAreaRevision(mutation.First);
+                        affectedAreas[mutation.First] = true;
+                        changed = true;
                         break;
                 }
             }
+
+            if (changed)
+            {
+                _data.ApplySnapshot(
+                    polygons,
+                    adjacencies,
+                    portals,
+                    affectedAreas,
+                    topologyChanged);
+            }
         }
 
-        private bool SetAdjacencyPair(int from, int to, bool enabled)
+        private bool SetAdjacencyPair(bool[] adjacencies, int from, int to, bool enabled)
         {
             if (!_data.AdjacencyByPolygonPair.TryGetValue(
                     new RuntimeEdgePair(from, to),
@@ -632,9 +965,9 @@ namespace NotRealGames.Areafinder
             for (int index = 0; index < indices.Count; index++)
             {
                 int adjacency = indices[index];
-                if (_data.AdjacencyEnabled[adjacency] != enabled)
+                if (adjacencies[adjacency] != enabled)
                 {
-                    _data.SetAdjacencyEnabled(adjacency, enabled);
+                    adjacencies[adjacency] = enabled;
                     changed = true;
                 }
             }
@@ -662,26 +995,6 @@ namespace NotRealGames.Areafinder
             return true;
         }
 
-        private bool CapturedStateChanged(RequestSlot slot)
-        {
-            if (slot.CapturedAreaRevisions == null ||
-                slot.CapturedTopologyRevision != _data.TopologyRevision ||
-                slot.CapturedAreaRevisions.Length != _data.AreaRevisions.Length)
-            {
-                return true;
-            }
-
-            for (int index = 0; index < slot.CapturedAreaRevisions.Length; index++)
-            {
-                if (slot.CapturedAreaRevisions[index] != _data.AreaRevisions[index])
-                {
-                    return true;
-                }
-            }
-
-            return false;
-        }
-
         private PathResultData GetResult(PathRequestHandle handle)
         {
             if (!IsPathViewValid(handle))
@@ -696,6 +1009,20 @@ namespace NotRealGames.Areafinder
         {
             return status == PathRequestStatus.Completed || status == PathRequestStatus.Failed ||
                    status == PathRequestStatus.Cancelled || status == PathRequestStatus.Stale;
+        }
+
+        private static long NextPositive(ref long value)
+        {
+            unchecked
+            {
+                value++;
+                if (value <= 0L)
+                {
+                    value = 1L;
+                }
+
+                return value;
+            }
         }
 
         private void ThrowIfDisposed()

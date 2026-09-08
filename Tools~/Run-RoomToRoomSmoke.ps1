@@ -131,8 +131,13 @@ public static class AreafinderRoomToRoomProbe
                     new NavigationLocation(world.Areas[1].Id, new Vector3(1f, 0f, 0f)),
                     compiled);
                 PathRequestHandle handle = runtime.Submit(query);
-                runtime.Tick(64);
-                runtime.Tick(0);
+                DateTime deadline = DateTime.UtcNow + TimeSpan.FromSeconds(10d);
+                while (!IsTerminal(runtime.GetStatus(handle)) && DateTime.UtcNow < deadline)
+                {
+                    runtime.Tick(64);
+                    System.Threading.Thread.Yield();
+                }
+
                 if (runtime.GetStatus(handle) != PathRequestStatus.Completed ||
                     !runtime.TryGetPath(handle, out NavigationPathView path) ||
                     path.AreaCount != 2 || path.PortalTransitionCount != 1 ||
@@ -173,6 +178,12 @@ public static class AreafinderRoomToRoomProbe
             Debug.LogException(exception);
             EditorApplication.Exit(1);
         }
+    }
+
+    private static bool IsTerminal(PathRequestStatus status)
+    {
+        return status == PathRequestStatus.Completed || status == PathRequestStatus.Failed ||
+               status == PathRequestStatus.Cancelled || status == PathRequestStatus.Stale;
     }
 
     private static string ReadVersion()

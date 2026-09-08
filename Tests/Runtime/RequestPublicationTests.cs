@@ -1,4 +1,7 @@
+using System;
 using System.Collections.Generic;
+using System.Diagnostics;
+using System.Threading;
 using NUnit.Framework;
 using UnityEngine;
 
@@ -58,8 +61,7 @@ namespace NotRealGames.Areafinder.Tests
                     callbackStatus = world.GetStatus(handle);
                 });
 
-            world.Tick(64);
-            Assert.That(world.GetStatus(request), Is.EqualTo(PathRequestStatus.RunningLocal));
+            AdvanceUntilReadyForPublication(world, request);
             Assert.That(world.SetPolygonEnabled(polygon.Id, false), Is.True);
             world.Tick(0);
 
@@ -115,8 +117,7 @@ namespace NotRealGames.Areafinder.Tests
                 new NavigationLocation(goalArea.Id, new Vector3(0.75f, 0f, 0.5f)),
                 policy));
 
-            world.Tick(64);
-            Assert.That(world.GetStatus(request), Is.EqualTo(PathRequestStatus.RunningLocal));
+            AdvanceUntilReadyForPublication(world, request);
             Assert.That(world.MarkAreaDirty(alternativeArea.Id), Is.True);
             world.Tick(0);
 
@@ -156,6 +157,26 @@ namespace NotRealGames.Areafinder.Tests
             T value = ScriptableObject.CreateInstance<T>();
             _objects.Add(value);
             return value;
+        }
+
+        private static void AdvanceUntilReadyForPublication(
+            NavigationWorld world,
+            PathRequestHandle handle)
+        {
+            var timeout = Stopwatch.StartNew();
+            while (timeout.Elapsed < TimeSpan.FromSeconds(10d))
+            {
+                world.Tick(64);
+                if (world.GetStatus(handle) == PathRequestStatus.RunningLocal &&
+                    world.InFlightSearchCount == 0)
+                {
+                    return;
+                }
+
+                Thread.Yield();
+            }
+
+            Assert.Fail("The request did not reach pre-publication within 10 seconds.");
         }
     }
 }

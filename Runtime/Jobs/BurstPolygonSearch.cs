@@ -9,6 +9,7 @@ namespace NotRealGames.Areafinder
 {
     internal sealed class BurstPolygonSearch : IDisposable
     {
+        private readonly NavigationRuntimeData _data;
         private readonly NativeArray<float3> _centroids;
         private readonly NativeArray<int> _polygonArea;
         private readonly NativeArray<int> _adjacencyStarts;
@@ -17,20 +18,20 @@ namespace NotRealGames.Areafinder
         private readonly NativeArray<int> _capabilityOffsets;
         private readonly NativeArray<int> _adjacencyTargets;
         private readonly NativeArray<ulong> _semanticWords;
-        private NativeArray<byte> _polygonEnabled;
-        private NativeArray<byte> _adjacencyEnabled;
-        private readonly NativeArray<double> _distances;
-        private readonly NativeArray<int> _previous;
-        private readonly NativeArray<int> _previousAdjacency;
-        private readonly NativeArray<byte> _visited;
-        private readonly NativeArray<int> _resultStatus;
-        private readonly NativeArray<double> _resultCost;
+        private readonly ScratchLane _synchronousLane;
+        private readonly ScratchLane[] _lanes;
         private readonly Dictionary<ulong, NativePolicyData> _policies =
             new Dictionary<ulong, NativePolicyData>();
         private bool _disposed;
 
-        internal BurstPolygonSearch(NavigationRuntimeData data)
+        internal BurstPolygonSearch(NavigationRuntimeData data, int maxConcurrentSearches)
         {
+            if (maxConcurrentSearches < 1)
+            {
+                throw new ArgumentOutOfRangeException(nameof(maxConcurrentSearches));
+            }
+
+            _data = data ?? throw new ArgumentNullException(nameof(data));
             int polygonCount = data.Polygons.Length;
             _centroids = new NativeArray<float3>(polygonCount, Allocator.Persistent);
             _polygonArea = new NativeArray<int>(polygonCount, Allocator.Persistent);
@@ -38,7 +39,6 @@ namespace NotRealGames.Areafinder
             _adjacencyCounts = new NativeArray<int>(polygonCount, Allocator.Persistent);
             _semanticOffsets = new NativeArray<int>(polygonCount, Allocator.Persistent);
             _capabilityOffsets = new NativeArray<int>(polygonCount, Allocator.Persistent);
-            _polygonEnabled = new NativeArray<byte>(polygonCount, Allocator.Persistent);
             for (int index = 0; index < polygonCount; index++)
             {
                 CompiledPolygonRecord polygon = data.Polygons[index];
@@ -51,24 +51,21 @@ namespace NotRealGames.Areafinder
                 _adjacencyCounts[index] = polygon.AdjacencyCount;
                 _semanticOffsets[index] = polygon.SemanticOffset;
                 _capabilityOffsets[index] = polygon.RequiredCapabilityOffset;
-                _polygonEnabled[index] = data.PolygonEnabled[index] ? (byte)1 : (byte)0;
             }
 
             _adjacencyTargets = new NativeArray<int>(data.Adjacencies.Length, Allocator.Persistent);
-            _adjacencyEnabled = new NativeArray<byte>(data.Adjacencies.Length, Allocator.Persistent);
             for (int index = 0; index < data.Adjacencies.Length; index++)
             {
                 _adjacencyTargets[index] = data.Adjacencies[index].ToPolygon;
-                _adjacencyEnabled[index] = data.AdjacencyEnabled[index] ? (byte)1 : (byte)0;
             }
 
             _semanticWords = new NativeArray<ulong>(data.SemanticWords, Allocator.Persistent);
-            _distances = new NativeArray<double>(polygonCount, Allocator.Persistent);
-            _previous = new NativeArray<int>(polygonCount, Allocator.Persistent);
-            _previousAdjacency = new NativeArray<int>(polygonCount, Allocator.Persistent);
-            _visited = new NativeArray<byte>(polygonCount, Allocator.Persistent);
-            _resultStatus = new NativeArray<int>(1, Allocator.Persistent);
-            _resultCost = new NativeArray<double>(1, Allocator.Persistent);
+            _synchronousLane = new ScratchLane(polygonCount);
+            _lanes = new ScratchLane[maxConcurrentSearches];
+            for (int index = 0; index < _lanes.Length; index++)
+            {
+                _lanes[index] = new ScratchLane(polygonCount);
+            }
         }
 
         internal bool TryFind(
@@ -85,8 +82,158 @@ namespace NotRealGames.Areafinder
             out double totalCost)
         {
             ThrowIfDisposed();
+            _synchronousLane.Handle = Schedule(
+                _synchronousLane,
+                policy,
+                _data.CurrentSnapshot,
+                areaIndex,
+                areaPolygonStart,
+                areaPolygonCount,
+                startPolygon,
+                goalPolygon,
+                start,
+                goal,
+                areaMultiplier,
+                baseCost);
+            _synchronousLane.Handle.Complete();
+            totalCost = _synchronousLane.ResultCost[0];
+            return _synchronousLane.ResultStatus[0] == 1;
+        }
+
+        internal int GetPrevious(int polygon) => _synchronousLane.Previous[polygon];
+        internal int GetPreviousAdjacency(int polygon) => _synchronousLane.PreviousAdjacency[polygon];
+        internal int InUseLaneCount
+        {
+            get
+            {
+                int count = 0;
+                for (int index = 0; index < _lanes.Length; index++)
+                {
+                    if (_lanes[index].InUse)
+                    {
+                        count++;
+                    }
+                }
+
+                return count;
+            }
+        }
+
+        internal bool TrySchedule(LocalSearchRequest request, out int laneIndex)
+        {
+            ThrowIfDisposed();
+            for (int index = 0; index < _lanes.Length; index++)
+            {
+                ScratchLane lane = _lanes[index];
+                if (lane.InUse)
+                {
+                    continue;
+                }
+
+                lane.InUse = true;
+                try
+                {
+                    lane.Handle = Schedule(
+                        lane,
+                        request.Policy,
+                        request.Snapshot,
+                        request.AreaIndex,
+                        request.AreaPolygonStart,
+                        request.AreaPolygonCount,
+                        request.StartPolygon,
+                        request.GoalPolygon,
+                        request.Start,
+                        request.Goal,
+                        request.AreaMultiplier,
+                        request.BaseCost);
+                    laneIndex = index;
+                    return true;
+                }
+                catch
+                {
+                    lane.InUse = false;
+                    lane.Handle = default;
+                    throw;
+                }
+            }
+
+            laneIndex = -1;
+            return false;
+        }
+
+        internal bool IsCompleted(int laneIndex)
+        {
+            ThrowIfDisposed();
+            ScratchLane lane = GetLane(laneIndex);
+            return lane.InUse && lane.Handle.IsCompleted;
+        }
+
+        internal bool Complete(int laneIndex, out double totalCost)
+        {
+            ThrowIfDisposed();
+            ScratchLane lane = GetLane(laneIndex);
+            lane.Handle.Complete();
+            totalCost = lane.ResultCost[0];
+            return lane.ResultStatus[0] == 1;
+        }
+
+        internal int GetPrevious(int laneIndex, int polygon) => GetLane(laneIndex).Previous[polygon];
+        internal int GetPreviousAdjacency(int laneIndex, int polygon) =>
+            GetLane(laneIndex).PreviousAdjacency[polygon];
+
+        internal void Release(int laneIndex)
+        {
+            ScratchLane lane = GetLane(laneIndex);
+            lane.Handle = default;
+            lane.InUse = false;
+        }
+
+        public void Dispose()
+        {
+            if (_disposed)
+            {
+                return;
+            }
+
+            _disposed = true;
+            _synchronousLane.Dispose();
+            for (int index = 0; index < _lanes.Length; index++)
+            {
+                _lanes[index].Dispose();
+            }
+
+            foreach (NativePolicyData policy in _policies.Values)
+            {
+                policy.Dispose();
+            }
+
+            _policies.Clear();
+            Dispose(_centroids);
+            Dispose(_polygonArea);
+            Dispose(_adjacencyStarts);
+            Dispose(_adjacencyCounts);
+            Dispose(_semanticOffsets);
+            Dispose(_capabilityOffsets);
+            Dispose(_adjacencyTargets);
+            Dispose(_semanticWords);
+        }
+
+        private JobHandle Schedule(
+            ScratchLane lane,
+            CompiledTraversalPolicy policy,
+            NavigationRuntimeSnapshot snapshot,
+            int areaIndex,
+            int areaPolygonStart,
+            int areaPolygonCount,
+            int startPolygon,
+            int goalPolygon,
+            float3 start,
+            float3 goal,
+            double areaMultiplier,
+            double baseCost)
+        {
             NativePolicyData nativePolicy = GetPolicy(policy);
-            var job = new PolygonSearchJob
+            return new PolygonSearchJob
             {
                 Centroids = _centroids,
                 PolygonArea = _polygonArea,
@@ -96,8 +243,8 @@ namespace NotRealGames.Areafinder
                 CapabilityOffsets = _capabilityOffsets,
                 AdjacencyTargets = _adjacencyTargets,
                 SemanticWords = _semanticWords,
-                PolygonEnabled = _polygonEnabled,
-                AdjacencyEnabled = _adjacencyEnabled,
+                PolygonEnabled = snapshot.NativePolygonEnabled,
+                AdjacencyEnabled = snapshot.NativeAdjacencyEnabled,
                 Capabilities = nativePolicy.Capabilities,
                 RequiredAll = nativePolicy.RequiredAll,
                 RequiredAny = nativePolicy.RequiredAny,
@@ -113,63 +260,23 @@ namespace NotRealGames.Areafinder
                 Goal = goal,
                 AreaMultiplier = areaMultiplier,
                 BaseCost = baseCost,
-                Distances = _distances,
-                Previous = _previous,
-                PreviousAdjacency = _previousAdjacency,
-                Visited = _visited,
-                ResultStatus = _resultStatus,
-                ResultCost = _resultCost
-            };
-            job.Schedule().Complete();
-            totalCost = _resultCost[0];
-            return _resultStatus[0] == 1;
+                Distances = lane.Distances,
+                Previous = lane.Previous,
+                PreviousAdjacency = lane.PreviousAdjacency,
+                Visited = lane.Visited,
+                ResultStatus = lane.ResultStatus,
+                ResultCost = lane.ResultCost
+            }.Schedule();
         }
 
-        internal int GetPrevious(int polygon) => _previous[polygon];
-        internal int GetPreviousAdjacency(int polygon) => _previousAdjacency[polygon];
-
-        internal void SetPolygonEnabled(int polygon, bool enabled)
+        private ScratchLane GetLane(int laneIndex)
         {
-            ThrowIfDisposed();
-            _polygonEnabled[polygon] = enabled ? (byte)1 : (byte)0;
-        }
-
-        internal void SetAdjacencyEnabled(int adjacency, bool enabled)
-        {
-            ThrowIfDisposed();
-            _adjacencyEnabled[adjacency] = enabled ? (byte)1 : (byte)0;
-        }
-
-        public void Dispose()
-        {
-            if (_disposed)
+            if ((uint)laneIndex >= (uint)_lanes.Length || !_lanes[laneIndex].InUse)
             {
-                return;
+                throw new ArgumentOutOfRangeException(nameof(laneIndex));
             }
 
-            _disposed = true;
-            foreach (NativePolicyData policy in _policies.Values)
-            {
-                policy.Dispose();
-            }
-
-            _policies.Clear();
-            Dispose(_centroids);
-            Dispose(_polygonArea);
-            Dispose(_adjacencyStarts);
-            Dispose(_adjacencyCounts);
-            Dispose(_semanticOffsets);
-            Dispose(_capabilityOffsets);
-            Dispose(_adjacencyTargets);
-            Dispose(_semanticWords);
-            Dispose(_polygonEnabled);
-            Dispose(_adjacencyEnabled);
-            Dispose(_distances);
-            Dispose(_previous);
-            Dispose(_previousAdjacency);
-            Dispose(_visited);
-            Dispose(_resultStatus);
-            Dispose(_resultCost);
+            return _lanes[laneIndex];
         }
 
         private NativePolicyData GetPolicy(CompiledTraversalPolicy policy)
@@ -197,6 +304,45 @@ namespace NotRealGames.Areafinder
             if (_disposed)
             {
                 throw new ObjectDisposedException(nameof(BurstPolygonSearch));
+            }
+        }
+
+        private sealed class ScratchLane : IDisposable
+        {
+            internal ScratchLane(int polygonCount)
+            {
+                Distances = new NativeArray<double>(polygonCount, Allocator.Persistent);
+                Previous = new NativeArray<int>(polygonCount, Allocator.Persistent);
+                PreviousAdjacency = new NativeArray<int>(polygonCount, Allocator.Persistent);
+                Visited = new NativeArray<byte>(polygonCount, Allocator.Persistent);
+                ResultStatus = new NativeArray<int>(1, Allocator.Persistent);
+                ResultCost = new NativeArray<double>(1, Allocator.Persistent);
+            }
+
+            internal NativeArray<double> Distances;
+            internal NativeArray<int> Previous;
+            internal NativeArray<int> PreviousAdjacency;
+            internal NativeArray<byte> Visited;
+            internal NativeArray<int> ResultStatus;
+            internal NativeArray<double> ResultCost;
+            internal JobHandle Handle;
+            internal bool InUse;
+
+            public void Dispose()
+            {
+                if (InUse)
+                {
+                    Handle.Complete();
+                }
+
+                BurstPolygonSearch.Dispose(Distances);
+                BurstPolygonSearch.Dispose(Previous);
+                BurstPolygonSearch.Dispose(PreviousAdjacency);
+                BurstPolygonSearch.Dispose(Visited);
+                BurstPolygonSearch.Dispose(ResultStatus);
+                BurstPolygonSearch.Dispose(ResultCost);
+                InUse = false;
+                Handle = default;
             }
         }
 
@@ -311,6 +457,19 @@ namespace NotRealGames.Areafinder
                 }
 
                 double firstMultiplier = AreaMultiplier * GetDistanceMultiplier(SemanticOffsets[StartPolygon]);
+                if (StartPolygon == GoalPolygon)
+                {
+                    double directCost = BaseCost + GetEntryPenalty(SemanticOffsets[StartPolygon]) +
+                                        math.distance(Start, Goal) * firstMultiplier;
+                    if (math.isfinite(directCost))
+                    {
+                        ResultCost[0] = directCost;
+                        ResultStatus[0] = 1;
+                    }
+
+                    return;
+                }
+
                 Distances[StartPolygon] = BaseCost + GetEntryPenalty(SemanticOffsets[StartPolygon]) +
                                           math.distance(Start, Centroids[StartPolygon]) * firstMultiplier;
 

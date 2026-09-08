@@ -84,9 +84,19 @@ function Assert-BenchmarkReport {
     $report = Get-Content -Raw -LiteralPath $Path | ConvertFrom-Json
     if ($report.marker -ne 'AREAFINDER_BENCHMARK_SUCCESS' -or
         [long]$report.idleAllocatedBytes -ne 0 -or
-        [double]$report.sameArea16x16.medianRoutesPerSecond -le 0 -or
-        [double]$report.threeArea8x8.medianRoutesPerSecond -le 0) {
+        [double]$report.sameArea32x32.cap1.medianRoutesPerSecond -le 0 -or
+        [double]$report.sameArea32x32.cap4.medianRoutesPerSecond -le 0 -or
+        [double]$report.sameArea32x32.cap4ToCap1ThroughputRatio -le 0 -or
+        [double]$report.threeArea16x16.cap1.medianRoutesPerSecond -le 0 -or
+        [double]$report.threeArea16x16.cap4.medianRoutesPerSecond -le 0 -or
+        [double]$report.threeArea16x16.cap4ToCap1ThroughputRatio -le 0) {
         throw "The benchmark report is incomplete or invalid: $Path"
+    }
+
+    if ($report.processor -like '*Ryzen 9 7900X*' -and
+        [int]$report.sameArea32x32.cap4.effectiveMaxConcurrentSearches -ge 4 -and
+        [double]$report.sameArea32x32.cap4ToCap1ThroughputRatio -lt 1.5) {
+        throw "The 32x32 four-lane reference-host speedup was below 1.5x: $Path"
     }
 
     return $report
@@ -133,15 +143,17 @@ try {
         '-testResults', $playResults,
         '-logFile', (Join-Path $results 'playmode.log')
     )
-    $playCount = Assert-TestResults -Path $playResults -Platform 'Play Mode' -MinimumTests 178
+    $playCount = Assert-TestResults -Path $playResults -Platform 'Play Mode' -MinimumTests 191
     $benchmark = Assert-BenchmarkReport -Path $benchmarkReport
 
     Write-Host "Areafinder tests passed: $editCount Edit Mode, $playCount Play Mode."
-    Write-Host ("Benchmark medians: 16x16 {0:N1} routes/s, {1:N1} B/request; 3x8x8 {2:N1} routes/s, {3:N1} B/request; idle {4} B." -f
-        [double]$benchmark.sameArea16x16.medianRoutesPerSecond,
-        [double]$benchmark.sameArea16x16.medianAllocatedBytesPerRequest,
-        [double]$benchmark.threeArea8x8.medianRoutesPerSecond,
-        [double]$benchmark.threeArea8x8.medianAllocatedBytesPerRequest,
+    Write-Host ("Benchmark medians: 32x32 cap1 {0:N1}, cap4 {1:N1} routes/s ({2:N2}x); 3x16x16 cap1 {3:N1}, cap4 {4:N1} routes/s ({5:N2}x); idle {6} B." -f
+        [double]$benchmark.sameArea32x32.cap1.medianRoutesPerSecond,
+        [double]$benchmark.sameArea32x32.cap4.medianRoutesPerSecond,
+        [double]$benchmark.sameArea32x32.cap4ToCap1ThroughputRatio,
+        [double]$benchmark.threeArea16x16.cap1.medianRoutesPerSecond,
+        [double]$benchmark.threeArea16x16.cap4.medianRoutesPerSecond,
+        [double]$benchmark.threeArea16x16.cap4ToCap1ThroughputRatio,
         [long]$benchmark.idleAllocatedBytes)
     Write-Host "Benchmark report: $benchmarkReport"
     if ($KeepProject) {

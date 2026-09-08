@@ -59,6 +59,55 @@ namespace NotRealGames.Areafinder
         }
     }
 
+    internal readonly struct LocalSearchRequest
+    {
+        internal LocalSearchRequest(
+            CompiledTraversalPolicy policy,
+            NavigationRuntimeSnapshot snapshot,
+            int areaIndex,
+            int areaPolygonStart,
+            int areaPolygonCount,
+            int startPolygon,
+            int goalPolygon,
+            Vector3 start,
+            Vector3 goal,
+            double areaMultiplier,
+            double baseCost)
+        {
+            Policy = policy;
+            Snapshot = snapshot;
+            AreaIndex = areaIndex;
+            AreaPolygonStart = areaPolygonStart;
+            AreaPolygonCount = areaPolygonCount;
+            StartPolygon = startPolygon;
+            GoalPolygon = goalPolygon;
+            Start = new float3(start.x, start.y, start.z);
+            Goal = new float3(goal.x, goal.y, goal.z);
+            AreaMultiplier = areaMultiplier;
+            BaseCost = baseCost;
+        }
+
+        internal CompiledTraversalPolicy Policy { get; }
+        internal NavigationRuntimeSnapshot Snapshot { get; }
+        internal int AreaIndex { get; }
+        internal int AreaPolygonStart { get; }
+        internal int AreaPolygonCount { get; }
+        internal int StartPolygon { get; }
+        internal int GoalPolygon { get; }
+        internal float3 Start { get; }
+        internal float3 Goal { get; }
+        internal double AreaMultiplier { get; }
+        internal double BaseCost { get; }
+    }
+
+    internal enum SearchAdvanceStatus : byte
+    {
+        Continue,
+        NeedsLocalSearch,
+        Completed,
+        Failed
+    }
+
     internal readonly struct LocalCacheKey : IEquatable<LocalCacheKey>, IComparable<LocalCacheKey>
     {
         internal LocalCacheKey(int fromPortalSide, int toPortalSide, ulong policy, ulong revision)
@@ -238,6 +287,443 @@ namespace NotRealGames.Areafinder
             internal DirectedPortal Portal { get; }
         }
 
+        internal sealed class State : IDisposable
+        {
+            private enum Phase : byte
+            {
+                SelectNode,
+                GoalEdge,
+                PortalEdges
+            }
+
+            private enum LocalPurpose : byte
+            {
+                Goal,
+                Portal
+            }
+
+            private readonly NavigationRuntimeData _data;
+            private readonly NavigationRuntimeSnapshot _snapshot;
+            private readonly PathQuery _query;
+            private readonly int _startArea;
+            private readonly int _goalArea;
+            private readonly int _startPolygon;
+            private readonly int _goalPolygon;
+            private readonly DirectedPortal[] _portals;
+            private readonly bool[] _evaluatedAreas;
+            private readonly double[] _distances;
+            private readonly bool[] _visited;
+            private readonly int[] _previous;
+            private readonly int[] _incomingPortal;
+            private readonly LocalPathData[] _incomingLocal;
+            private Phase _phase;
+            private int _current;
+            private int _currentArea;
+            private int _currentPolygon;
+            private Vector3 _currentPosition;
+            private int _portalCursor;
+            private double _bestGoalCost = double.PositiveInfinity;
+            private int _bestGoalNode = -1;
+            private LocalPathData _bestGoalLocal;
+            private LocalPurpose _pendingPurpose;
+            private int _pendingPortal;
+            private int _pendingArea;
+            private bool _pendingCacheStore;
+            private LocalCacheKey _pendingCacheKey;
+            private bool _disposed;
+
+            private State(
+                NavigationRuntimeData data,
+                NavigationRuntimeSnapshot snapshot,
+                PathQuery query,
+                int startArea,
+                int goalArea,
+                int startPolygon,
+                int goalPolygon)
+            {
+                _data = data;
+                _snapshot = snapshot;
+                _query = query;
+                _startArea = startArea;
+                _goalArea = goalArea;
+                _startPolygon = startPolygon;
+                _goalPolygon = goalPolygon;
+                _evaluatedAreas = new bool[data.Areas.Length];
+                _evaluatedAreas[startArea] = true;
+                _evaluatedAreas[goalArea] = true;
+                _portals = BuildDirectedPortals(data, query.Policy, snapshot);
+                int nodeCount = _portals.Length + 1;
+                _distances = new double[nodeCount];
+                _visited = new bool[nodeCount];
+                _previous = new int[nodeCount];
+                _incomingPortal = new int[nodeCount];
+                _incomingLocal = new LocalPathData[nodeCount];
+                for (int index = 0; index < nodeCount; index++)
+                {
+                    _distances[index] = double.PositiveInfinity;
+                    _previous[index] = -1;
+                    _incomingPortal[index] = -1;
+                }
+
+                _distances[0] = 0d;
+            }
+
+            internal LocalSearchRequest PendingLocalSearch { get; private set; }
+
+            internal static bool TryCreate(
+                NavigationRuntimeData data,
+                NavigationRuntimeSnapshot snapshot,
+                PathQuery query,
+                out State state,
+                out PathFailureReason failure)
+            {
+                state = null;
+                failure = PathFailureReason.None;
+                if (!query.IsValid || query.Policy.RegistryFingerprint != data.RegistryFingerprint ||
+                    query.Policy.WordCount != data.SemanticWordCount)
+                {
+                    failure = PathFailureReason.InvalidRequest;
+                    return false;
+                }
+
+                if (!data.AreaById.TryGetValue(query.Start.AreaId, out int startArea) ||
+                    !data.AreaById.TryGetValue(query.Goal.AreaId, out int goalArea) ||
+                    !TryFindPolygon(
+                        data,
+                        snapshot,
+                        query.Policy,
+                        startArea,
+                        query.Start.LocalPosition,
+                        out int startPolygon) ||
+                    !TryFindPolygon(
+                        data,
+                        snapshot,
+                        query.Policy,
+                        goalArea,
+                        query.Goal.LocalPosition,
+                        out int goalPolygon))
+                {
+                    failure = PathFailureReason.LocationNotFound;
+                    return false;
+                }
+
+                state = new State(
+                    data,
+                    snapshot,
+                    query,
+                    startArea,
+                    goalArea,
+                    startPolygon,
+                    goalPolygon);
+                return true;
+            }
+
+            internal SearchAdvanceStatus Advance(
+                out PathResultData result,
+                out PathFailureReason failure)
+            {
+                result = null;
+                failure = PathFailureReason.None;
+                switch (_phase)
+                {
+                    case Phase.SelectNode:
+                        _current = FindCheapestUnvisited(_distances, _visited);
+                        if (_current < 0 || _distances[_current] > _bestGoalCost)
+                        {
+                            return Finish(out result, out failure);
+                        }
+
+                        _visited[_current] = true;
+                        GetNodeLocation(
+                            _portals,
+                            _current,
+                            _startArea,
+                            _startPolygon,
+                            _query.Start.LocalPosition,
+                            out _currentArea,
+                            out _currentPolygon,
+                            out _currentPosition);
+                        _evaluatedAreas[_currentArea] = true;
+                        _portalCursor = 0;
+                        _phase = Phase.GoalEdge;
+                        return SearchAdvanceStatus.Continue;
+
+                    case Phase.GoalEdge:
+                        _phase = Phase.PortalEdges;
+                        return _currentArea == _goalArea
+                            ? StartLocal(
+                                LocalPurpose.Goal,
+                                -1,
+                                false,
+                                default,
+                                _currentArea,
+                                _currentPosition,
+                                _query.Goal.LocalPosition,
+                                _currentPolygon,
+                                _goalPolygon)
+                            : SearchAdvanceStatus.Continue;
+
+                    case Phase.PortalEdges:
+                        if (_portalCursor >= _portals.Length)
+                        {
+                            _phase = Phase.SelectNode;
+                            return SearchAdvanceStatus.Continue;
+                        }
+
+                        int portalIndex = _portalCursor++;
+                        DirectedPortal portal = _portals[portalIndex];
+                        if (portal.EntryArea != _currentArea)
+                        {
+                            return SearchAdvanceStatus.Continue;
+                        }
+
+                        int incomingSide = _current > 0 ? _portals[_current - 1].SideKey : -1;
+                        bool cacheStore = incomingSide >= 0;
+                        var cacheKey = new LocalCacheKey(
+                            incomingSide,
+                            portal.SideKey,
+                            _query.Policy.Fingerprint,
+                            _snapshot.AreaRevisions[_currentArea]);
+                        if (cacheStore &&
+                            _data.Caches[_currentArea].TryGet(cacheKey, out LocalPathData cached, out bool reachable))
+                        {
+                            if (reachable)
+                            {
+                                ApplyPortal(portalIndex, cached);
+                            }
+
+                            return SearchAdvanceStatus.Continue;
+                        }
+
+                        return StartLocal(
+                            LocalPurpose.Portal,
+                            portalIndex,
+                            cacheStore,
+                            cacheKey,
+                            _currentArea,
+                            _currentPosition,
+                            portal.EntrySpan.Midpoint,
+                            _currentPolygon,
+                            portal.EntryPolygon);
+
+                    default:
+                        throw new InvalidOperationException("The navigation search entered an invalid phase.");
+                }
+            }
+
+            internal void CompleteLocal(BurstPolygonSearch search, int laneIndex, bool found, double totalCost)
+            {
+                LocalSearchRequest request = PendingLocalSearch;
+                LocalPathData path = null;
+                if (found)
+                {
+                    var corridor = new List<int>();
+                    var adjacencyPath = new List<int>();
+                    int cursor = request.GoalPolygon;
+                    corridor.Add(cursor);
+                    while (cursor != request.StartPolygon)
+                    {
+                        int adjacency = search.GetPreviousAdjacency(laneIndex, cursor);
+                        cursor = search.GetPrevious(laneIndex, cursor);
+                        if (adjacency < 0 || cursor < 0)
+                        {
+                            throw new InvalidOperationException("The Burst search returned an invalid corridor.");
+                        }
+
+                        adjacencyPath.Add(adjacency);
+                        corridor.Add(cursor);
+                    }
+
+                    corridor.Reverse();
+                    adjacencyPath.Reverse();
+                    var crossings = new NavigationCrossingSpan[adjacencyPath.Count];
+                    for (int index = 0; index < crossings.Length; index++)
+                    {
+                        CompiledAdjacencyRecord adjacency = _data.Adjacencies[adjacencyPath[index]];
+                        crossings[index] = new NavigationCrossingSpan(
+                            _data.Areas[request.AreaIndex].Id,
+                            _data.Polygons[adjacency.FromPolygon].Id,
+                            _data.Polygons[adjacency.ToPolygon].Id,
+                            adjacency.SpanStart,
+                            adjacency.SpanEnd);
+                    }
+
+                    Vector3 start = new Vector3(request.Start.x, request.Start.y, request.Start.z);
+                    Vector3 goal = new Vector3(request.Goal.x, request.Goal.y, request.Goal.z);
+                    path = new LocalPathData(
+                        request.AreaIndex,
+                        start,
+                        goal,
+                        totalCost,
+                        corridor.ToArray(),
+                        crossings,
+                        BuildFunnel(_data, corridor, crossings, start, goal));
+                }
+
+                CompletePendingLocal(path);
+            }
+
+            internal bool CapturedStateChanged()
+            {
+                if (_snapshot.TopologyRevision != _data.TopologyRevision)
+                {
+                    return true;
+                }
+
+                for (int index = 0; index < _evaluatedAreas.Length; index++)
+                {
+                    if (_evaluatedAreas[index] &&
+                        _snapshot.AreaRevisions[index] != _data.AreaRevisions[index])
+                    {
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            public void Dispose()
+            {
+                if (_disposed)
+                {
+                    return;
+                }
+
+                _disposed = true;
+                _snapshot.Release();
+            }
+
+            private SearchAdvanceStatus StartLocal(
+                LocalPurpose purpose,
+                int portalIndex,
+                bool cacheStore,
+                LocalCacheKey cacheKey,
+                int areaIndex,
+                Vector3 start,
+                Vector3 goal,
+                int startPolygon,
+                int goalPolygon)
+            {
+                _pendingPurpose = purpose;
+                _pendingPortal = portalIndex;
+                _pendingArea = areaIndex;
+                _pendingCacheStore = cacheStore;
+                _pendingCacheKey = cacheKey;
+                CompiledAreaRecord area = _data.Areas[areaIndex];
+                if (!_query.Policy.CanTraverse(
+                        NavigationElementKind.Area,
+                        _data.SemanticWords,
+                        area.SemanticOffset,
+                        area.RequiredCapabilityOffset) ||
+                    !CanUsePolygon(_data, _snapshot, _query.Policy, startPolygon) ||
+                    !CanUsePolygon(_data, _snapshot, _query.Policy, goalPolygon))
+                {
+                    CompletePendingLocal(null);
+                    return SearchAdvanceStatus.Continue;
+                }
+
+                double areaMultiplier = _query.Policy.GetDistanceMultiplier(
+                    _data.SemanticWords,
+                    area.SemanticOffset);
+                double baseCost = _query.Policy.GetEntryPenalty(_data.SemanticWords, area.SemanticOffset);
+                PendingLocalSearch = new LocalSearchRequest(
+                    _query.Policy,
+                    _snapshot,
+                    areaIndex,
+                    area.PolygonStart,
+                    area.PolygonCount,
+                    startPolygon,
+                    goalPolygon,
+                    start,
+                    goal,
+                    areaMultiplier,
+                    baseCost);
+                return SearchAdvanceStatus.NeedsLocalSearch;
+            }
+
+            private void CompletePendingLocal(LocalPathData path)
+            {
+                if (_pendingCacheStore &&
+                    _data.IsAreaRevisionCurrent(_snapshot, _pendingArea))
+                {
+                    _data.Caches[_pendingArea].Store(_pendingCacheKey, path);
+                }
+
+                if (path != null)
+                {
+                    if (_pendingPurpose == LocalPurpose.Goal)
+                    {
+                        double candidate = _distances[_current] + path.Cost;
+                        if (candidate < _bestGoalCost ||
+                            (candidate.Equals(_bestGoalCost) && _current < _bestGoalNode))
+                        {
+                            _bestGoalCost = candidate;
+                            _bestGoalNode = _current;
+                            _bestGoalLocal = path;
+                        }
+                    }
+                    else
+                    {
+                        ApplyPortal(_pendingPortal, path);
+                    }
+                }
+
+                _pendingCacheStore = false;
+                PendingLocalSearch = default;
+            }
+
+            private void ApplyPortal(int portalIndex, LocalPathData path)
+            {
+                DirectedPortal portal = _portals[portalIndex];
+                double candidate = _distances[_current] + path.Cost +
+                                   GetPortalCost(_data, _query.Policy, portal.Portal);
+                if (!IsFinite(candidate))
+                {
+                    return;
+                }
+
+                int destination = portalIndex + 1;
+                if (candidate < _distances[destination] ||
+                    (candidate.Equals(_distances[destination]) && _current < _previous[destination]))
+                {
+                    _distances[destination] = candidate;
+                    _previous[destination] = _current;
+                    _incomingPortal[destination] = portalIndex;
+                    _incomingLocal[destination] = path;
+                }
+            }
+
+            private SearchAdvanceStatus Finish(
+                out PathResultData result,
+                out PathFailureReason failure)
+            {
+                if (_bestGoalNode < 0)
+                {
+                    result = null;
+                    failure = _startArea == _goalArea
+                        ? PathFailureReason.NoLocalRoute
+                        : PathFailureReason.NoGlobalRoute;
+                    return SearchAdvanceStatus.Failed;
+                }
+
+                result = BuildResult(
+                    _data,
+                    _query,
+                    _portals,
+                    _previous,
+                    _incomingPortal,
+                    _incomingLocal,
+                    _bestGoalNode,
+                    _bestGoalLocal,
+                    _bestGoalCost,
+                    _snapshot.AreaRevisions,
+                    _snapshot.TopologyRevision,
+                    _evaluatedAreas);
+                failure = PathFailureReason.None;
+                return SearchAdvanceStatus.Completed;
+            }
+        }
+
         internal static bool TrySolve(
             NavigationRuntimeData data,
             PathQuery query,
@@ -248,6 +734,7 @@ namespace NotRealGames.Areafinder
         {
             result = null;
             failure = PathFailureReason.None;
+            NavigationRuntimeSnapshot snapshot = data.CurrentSnapshot;
             if (!query.IsValid || query.Policy.RegistryFingerprint != data.RegistryFingerprint ||
                 query.Policy.WordCount != data.SemanticWordCount)
             {
@@ -257,8 +744,8 @@ namespace NotRealGames.Areafinder
 
             if (!data.AreaById.TryGetValue(query.Start.AreaId, out int startArea) ||
                 !data.AreaById.TryGetValue(query.Goal.AreaId, out int goalArea) ||
-                !TryFindPolygon(data, query.Policy, startArea, query.Start.LocalPosition, out int startPolygon) ||
-                !TryFindPolygon(data, query.Policy, goalArea, query.Goal.LocalPosition, out int goalPolygon))
+                !TryFindPolygon(data, snapshot, query.Policy, startArea, query.Start.LocalPosition, out int startPolygon) ||
+                !TryFindPolygon(data, snapshot, query.Policy, goalArea, query.Goal.LocalPosition, out int goalPolygon))
             {
                 failure = PathFailureReason.LocationNotFound;
                 return false;
@@ -267,7 +754,7 @@ namespace NotRealGames.Areafinder
             var evaluatedAreas = new bool[data.Areas.Length];
             evaluatedAreas[startArea] = true;
             evaluatedAreas[goalArea] = true;
-            DirectedPortal[] portals = BuildDirectedPortals(data, query.Policy);
+            DirectedPortal[] portals = BuildDirectedPortals(data, query.Policy, snapshot);
             int nodeCount = portals.Length + 1;
             var distances = new double[nodeCount];
             var visited = new bool[nodeCount];
@@ -309,6 +796,7 @@ namespace NotRealGames.Areafinder
                 if (currentArea == goalArea &&
                     TryFindLocalPath(
                         data,
+                        snapshot,
                         query.Policy,
                         currentArea,
                         currentPosition,
@@ -337,6 +825,7 @@ namespace NotRealGames.Areafinder
 
                     if (!TryGetPortalLocalPath(
                             data,
+                            snapshot,
                             query.Policy,
                             current > 0 ? portals[current - 1].SideKey : -1,
                             portal.SideKey,
@@ -414,7 +903,7 @@ namespace NotRealGames.Areafinder
                 }
 
                 Vector3 local = data.Areas[hintedArea].Frame.ToLocal(universePosition);
-                if (!TryFindPolygon(data, policy, hintedArea, local, out _))
+                if (!TryFindPolygon(data, data.CurrentSnapshot, policy, hintedArea, local, out _))
                 {
                     return LocationResolveStatus.NotFound;
                 }
@@ -426,7 +915,7 @@ namespace NotRealGames.Areafinder
             for (int areaIndex = 0; areaIndex < data.Areas.Length; areaIndex++)
             {
                 Vector3 local = data.Areas[areaIndex].Frame.ToLocal(universePosition);
-                if (!TryFindPolygon(data, policy, areaIndex, local, out _))
+                if (!TryFindPolygon(data, data.CurrentSnapshot, policy, areaIndex, local, out _))
                 {
                     continue;
                 }
@@ -451,13 +940,14 @@ namespace NotRealGames.Areafinder
 
         private static DirectedPortal[] BuildDirectedPortals(
             NavigationRuntimeData data,
-            CompiledTraversalPolicy policy)
+            CompiledTraversalPolicy policy,
+            NavigationRuntimeSnapshot snapshot)
         {
             var result = new List<DirectedPortal>(data.Portals.Length * 2);
             for (int index = 0; index < data.Portals.Length; index++)
             {
                 CompiledPortalRecord portal = data.Portals[index];
-                if (!data.PortalEnabled[index] ||
+                if (!snapshot.PortalEnabled[index] ||
                     !policy.CanTraverse(
                         NavigationElementKind.Portal,
                         data.SemanticWords,
@@ -479,6 +969,7 @@ namespace NotRealGames.Areafinder
 
         private static bool TryGetPortalLocalPath(
             NavigationRuntimeData data,
+            NavigationRuntimeSnapshot snapshot,
             CompiledTraversalPolicy policy,
             int incomingPortalSide,
             int outgoingPortalSide,
@@ -494,7 +985,7 @@ namespace NotRealGames.Areafinder
                     incomingPortalSide,
                     outgoingPortalSide,
                     policy.Fingerprint,
-                    data.AreaRevisions[areaIndex]);
+                    snapshot.AreaRevisions[areaIndex]);
                 if (data.Caches[areaIndex].TryGet(key, out path, out bool reachable))
                 {
                     return reachable;
@@ -502,6 +993,7 @@ namespace NotRealGames.Areafinder
 
                 if (!TryFindLocalPath(
                         data,
+                        snapshot,
                         policy,
                         areaIndex,
                         start,
@@ -520,6 +1012,7 @@ namespace NotRealGames.Areafinder
 
             return TryFindLocalPath(
                 data,
+                snapshot,
                 policy,
                 areaIndex,
                 start,
@@ -531,6 +1024,7 @@ namespace NotRealGames.Areafinder
 
         private static bool TryFindLocalPath(
             NavigationRuntimeData data,
+            NavigationRuntimeSnapshot snapshot,
             CompiledTraversalPolicy policy,
             int areaIndex,
             Vector3 start,
@@ -546,8 +1040,8 @@ namespace NotRealGames.Areafinder
                     data.SemanticWords,
                     area.SemanticOffset,
                     area.RequiredCapabilityOffset) ||
-                !CanUsePolygon(data, policy, startPolygon) ||
-                !CanUsePolygon(data, policy, goalPolygon))
+                !CanUsePolygon(data, snapshot, policy, startPolygon) ||
+                !CanUsePolygon(data, snapshot, policy, goalPolygon))
             {
                 return false;
             }
@@ -867,6 +1361,7 @@ namespace NotRealGames.Areafinder
 
         private static bool TryFindPolygon(
             NavigationRuntimeData data,
+            NavigationRuntimeSnapshot snapshot,
             CompiledTraversalPolicy policy,
             int areaIndex,
             Vector3 position,
@@ -886,7 +1381,7 @@ namespace NotRealGames.Areafinder
             int end = area.PolygonStart + area.PolygonCount;
             for (int index = area.PolygonStart; index < end; index++)
             {
-                if (CanUsePolygon(data, policy, index) && PointInPolygon(data, index, position))
+                if (CanUsePolygon(data, snapshot, policy, index) && PointInPolygon(data, index, position))
                 {
                     polygonIndex = index;
                     return true;
@@ -924,10 +1419,11 @@ namespace NotRealGames.Areafinder
 
         private static bool CanUsePolygon(
             NavigationRuntimeData data,
+            NavigationRuntimeSnapshot snapshot,
             CompiledTraversalPolicy policy,
             int polygonIndex)
         {
-            if ((uint)polygonIndex >= (uint)data.Polygons.Length || !data.PolygonEnabled[polygonIndex])
+            if ((uint)polygonIndex >= (uint)data.Polygons.Length || !snapshot.PolygonEnabled[polygonIndex])
             {
                 return false;
             }

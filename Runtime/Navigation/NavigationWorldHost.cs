@@ -16,6 +16,7 @@ namespace NotRealGames.Areafinder
 
         [SerializeField] private NavigationBakeAsset _bake;
         [SerializeField, Min(0)] private int _cacheCapacityPerArea = 256;
+        [SerializeField, Min(1)] private int _maxConcurrentSearches = 4;
         [SerializeField, Min(0)] private int _workBudgetPerFrame = 64;
 
         private readonly List<OwnedRequest> _ownedRequests = new List<OwnedRequest>();
@@ -36,7 +37,10 @@ namespace NotRealGames.Areafinder
                 return false;
             }
 
-            _world = new NavigationWorld(_bake, _cacheCapacityPerArea);
+            _world = new NavigationWorld(
+                _bake,
+                _cacheCapacityPerArea,
+                _maxConcurrentSearches);
             return true;
         }
 
@@ -114,6 +118,7 @@ namespace NotRealGames.Areafinder
         private void OnValidate()
         {
             _cacheCapacityPerArea = Math.Max(0, _cacheCapacityPerArea);
+            _maxConcurrentSearches = Math.Max(1, _maxConcurrentSearches);
             _workBudgetPerFrame = Math.Max(0, _workBudgetPerFrame);
         }
     }
