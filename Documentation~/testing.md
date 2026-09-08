@@ -70,7 +70,7 @@ GitHub Actions remains a static package-structure signal. For 0.3, the complete 
 
 ## HORDE dogfood and deferred 1.0 acceptance
 
-The 0.3 HORDE gate runs 72 agents against a multi-Area fixture, exercises mixed priorities and policies, staggered and simultaneous submissions, cancellation and immediate handle reuse, dependency staleness, Portal closure, reopening, replanning, agent destruction/respawn, and guidance traversal, then requires every project-owned kinematic Rigidbody consumer to recover. The host runs without AI Navigation, and static checks reject NavMesh or High Precision dependencies in package source.
+The 0.3 HORDE gate runs 72 non-kinematic Rigidbody agents with colliders against a multi-Area fixture, exercises mixed priorities and policies, staggered and simultaneous submissions, cancellation and immediate handle reuse, dependency staleness, Portal closure, reopening, replanning, agent destruction/respawn, and guidance traversal, then requires every project-owned consumer to recover. The host runs without AI Navigation, and static checks reject NavMesh or High Precision dependencies in package source.
 
 The longer diagnostic soak continuously moves and replans agents with deterministic seeded randomness, periodically mutates topology, cancels requests, destroys and respawns owners, and checks bounded native/managed memory and completion latency. Reproducible leaks or lifetime corruption block release, but this messy-gameplay gate is deliberately separate from the synthetic numerical benchmark.
 
