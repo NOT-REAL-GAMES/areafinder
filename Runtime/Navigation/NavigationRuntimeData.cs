@@ -12,6 +12,19 @@ namespace NotRealGames.Areafinder
             NavigationBakeAsset bake,
             int cacheCapacityPerArea,
             int maxConcurrentSearches = 1)
+            : this(
+                bake,
+                cacheCapacityPerArea,
+                maxConcurrentSearches,
+                new SearchExecutionOptions(SearchStrategy.AStar))
+        {
+        }
+
+        internal NavigationRuntimeData(
+            NavigationBakeAsset bake,
+            int cacheCapacityPerArea,
+            int maxConcurrentSearches,
+            SearchExecutionOptions searchOptions)
         {
             if (bake == null || !bake.IsUsable)
             {
@@ -104,7 +117,7 @@ namespace NotRealGames.Areafinder
                 portalEnabled,
                 areaRevisions,
                 1UL);
-            PolygonSearch = new BurstPolygonSearch(this, maxConcurrentSearches);
+            PolygonSearch = new BurstPolygonSearch(this, maxConcurrentSearches, searchOptions);
         }
 
         internal ulong RegistryFingerprint { get; }

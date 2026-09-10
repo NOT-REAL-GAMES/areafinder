@@ -2,7 +2,7 @@
 
 ## Outcome
 
-Areafinder 0.3 retains fixed-stride semantic words in bake schema 1. Every compiled mask stores the registry-wide word count in one flat `ulong` pool and existing records address their mask by offset.
+Areafinder 0.4 retains fixed-stride semantic words in bake schema 1. Every compiled mask stores the registry-wide word count in one flat `ulong` pool and existing records address their mask by offset. Reverse adjacency and landmark tables are derived runtime accelerators and do not alter this canonical layout.
 
 Neither trimmed pooled masks nor interned masks met the replacement gate across the complete representative workload matrix. This is a decision for the current pre-1.0 schema, not permission to freeze the 1.0 bake format without player/Burst measurements from real projects.
 

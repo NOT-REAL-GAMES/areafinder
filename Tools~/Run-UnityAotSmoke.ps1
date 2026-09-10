@@ -98,6 +98,8 @@ function Invoke-PlayerProof {
 
     $result = Get-Content -Raw -LiteralPath $marker | ConvertFrom-Json
     if (-not $result.success -or $result.backend -ne $Backend -or
+        -not $result.productionAStarSameArea -or -not $result.productionAStarCrossArea -or
+        -not $result.altUnavailableFallback -or
         [int]$result.peakInFlight -lt 2 -or [int]$result.effectiveConcurrency -lt 2 -or
         -not $result.cancelRetainedCapacity -or [int]$result.finalInFlight -ne 0 -or
         [int]$result.finalInUseLanes -ne 0 -or [int]$result.finalActiveSnapshots -ne 1 -or
@@ -135,6 +137,7 @@ public sealed class AreafinderAotProbe : MonoBehaviour
 {
     private enum Phase : byte
     {
+        AltFallback,
         Initial,
         Closed,
         ReopenQueued,
@@ -146,6 +149,9 @@ public sealed class AreafinderAotProbe : MonoBehaviour
     {
         public bool success;
         public string backend;
+        public bool productionAStarSameArea;
+        public bool productionAStarCrossArea;
+        public bool altUnavailableFallback;
         public int peakInFlight;
         public int effectiveConcurrency;
         public bool cancelRetainedCapacity;
@@ -195,6 +201,9 @@ public sealed class AreafinderAotProbe : MonoBehaviour
     private int _polygonCount;
     private int _crossingCount;
     private int _steeringCount;
+    private bool _productionAStarSameArea;
+    private bool _productionAStarCrossArea;
+    private bool _altUnavailableFallback;
     private bool _finished;
 
     public void Configure(
@@ -238,8 +247,19 @@ public sealed class AreafinderAotProbe : MonoBehaviour
                 return;
             }
 
-            _world = new NavigationWorld(_bake, 256, 4);
-            _requests = SubmitCrossArea(64);
+            _world = new NavigationWorld(
+                _bake,
+                4,
+                1,
+                new SearchExecutionOptions(SearchStrategy.AltAStar));
+            _requests = new[]
+            {
+                _world.Submit(new PathQuery(
+                    new NavigationLocation(_startArea, _start),
+                    new NavigationLocation(_startArea, _goal),
+                    _compiledPolicy))
+            };
+            _phase = Phase.AltFallback;
         }
         catch (Exception exception)
         {
@@ -273,6 +293,10 @@ public sealed class AreafinderAotProbe : MonoBehaviour
 
             switch (_phase)
             {
+                case Phase.AltFallback:
+                    DrainAltFallback();
+                    break;
+
                 case Phase.Initial:
                     if (!_mutationQueued && _world.InFlightSearchCount >= 2)
                     {
@@ -349,6 +373,8 @@ public sealed class AreafinderAotProbe : MonoBehaviour
                         bool success = _completed == 64 && _current && _areaCount == 2 &&
                                        _portalCount == 1 && _polygonCount >= 4 &&
                                        _crossingCount >= 2 && _steeringCount >= 2 &&
+                                       _productionAStarSameArea && _productionAStarCrossArea &&
+                                       _altUnavailableFallback &&
                                        _cancelRetainedCapacity && _world.InUseScratchLaneCount == 0 &&
                                        _world.ActiveSnapshotCount == 1 &&
                                        _world.CurrentSnapshotReferenceCount == 1;
@@ -356,6 +382,9 @@ public sealed class AreafinderAotProbe : MonoBehaviour
                         {
                             success = success,
                             backend = _backend,
+                            productionAStarSameArea = _productionAStarSameArea,
+                            productionAStarCrossArea = _productionAStarCrossArea,
+                            altUnavailableFallback = _altUnavailableFallback,
                             peakInFlight = _peakInFlight,
                             effectiveConcurrency = _world.EffectiveMaxConcurrentSearches,
                             cancelRetainedCapacity = _cancelRetainedCapacity,
@@ -400,6 +429,46 @@ public sealed class AreafinderAotProbe : MonoBehaviour
         }
 
         return _world.SubmitBatch(queries);
+    }
+
+    private void DrainAltFallback()
+    {
+        PathRequestHandle handle = _requests[0];
+        PathRequestStatus status = _world.GetStatus(handle);
+        if (status != PathRequestStatus.Completed)
+        {
+            if (status == PathRequestStatus.Failed || status == PathRequestStatus.Stale ||
+                status == PathRequestStatus.Cancelled || status == PathRequestStatus.Invalid)
+            {
+                Fail("ALT fallback request terminated as " + status + ".");
+            }
+
+            return;
+        }
+
+        if (!_world.TryGetPath(handle, out NavigationPathView path) || !_world.IsCurrent(path) ||
+            path.AreaCount != 1 || path.PortalTransitionCount != 0 || path.PolygonCount < 2)
+        {
+            Fail("ALT fallback did not return a current nontrivial same-Area route.");
+            return;
+        }
+
+        if (!_world.TryGetSearchDiagnostics(handle, out SearchDiagnostics diagnostics) ||
+            diagnostics.RequestedStrategy != SearchStrategy.AltAStar ||
+            diagnostics.ExecutedStrategy != SearchStrategy.AStar ||
+            diagnostics.FallbackReason != SearchFallbackReason.AcceleratorUnavailable ||
+            diagnostics.LocalSearchCount < 1 || diagnostics.NodesExpanded < 1)
+        {
+            Fail("ALT without prewarmed accelerator data did not report the A* fallback.");
+            return;
+        }
+
+        _altUnavailableFallback = true;
+        _world.Release(handle);
+        _world.Dispose();
+        _world = new NavigationWorld(_bake, 256, 4);
+        _requests = SubmitCrossArea(64);
+        _phase = Phase.Initial;
     }
 
     private PathRequestHandle[] SubmitMixed(int count)
@@ -520,13 +589,18 @@ public sealed class AreafinderAotProbe : MonoBehaviour
             PathRequestStatus status = _world.GetStatus(handle);
             if (status == PathRequestStatus.Completed)
             {
+                bool crossArea = index % 3 != 2;
+                if (!RecordProductionStrategy(handle, crossArea))
+                {
+                    return;
+                }
+
                 if (!_world.TryGetPath(handle, out NavigationPathView path) || !_world.IsCurrent(path))
                 {
                     Fail("A completed recovery route was missing or stale.");
                     return;
                 }
 
-                bool crossArea = index % 3 != 2;
                 if ((crossArea && (path.AreaCount != 2 || path.PortalTransitionCount != 1 ||
                                    path.PolygonCount < 4 || path.CrossingSpanCount < 2)) ||
                     (!crossArea && (path.AreaCount != 1 || path.PortalTransitionCount != 0 ||
@@ -561,6 +635,30 @@ public sealed class AreafinderAotProbe : MonoBehaviour
         }
     }
 
+    private bool RecordProductionStrategy(PathRequestHandle handle, bool crossArea)
+    {
+        if (!_world.TryGetSearchDiagnostics(handle, out SearchDiagnostics diagnostics) ||
+            diagnostics.RequestedStrategy != SearchStrategy.AStar ||
+            diagnostics.ExecutedStrategy != SearchStrategy.AStar ||
+            diagnostics.LocalSearchCount < 1 || diagnostics.NodesExpanded < 1 ||
+            diagnostics.HeuristicEvaluations < 1)
+        {
+            Fail("A public request did not execute the production A* strategy.");
+            return false;
+        }
+
+        if (crossArea)
+        {
+            _productionAStarCrossArea = true;
+        }
+        else
+        {
+            _productionAStarSameArea = true;
+        }
+
+        return true;
+    }
+
     private bool AllReleased()
     {
         for (int index = 0; index < _requests.Length; index++)
@@ -580,6 +678,9 @@ public sealed class AreafinderAotProbe : MonoBehaviour
         {
             success = false,
             backend = _backend,
+            productionAStarSameArea = _productionAStarSameArea,
+            productionAStarCrossArea = _productionAStarCrossArea,
+            altUnavailableFallback = _altUnavailableFallback,
             peakInFlight = _peakInFlight,
             effectiveConcurrency = _world != null ? _world.EffectiveMaxConcurrentSearches : 0,
             stale = _stale,

@@ -1,8 +1,8 @@
 # Areafinder
 
-Areafinder is an authored navigation framework under active pre-1.0 development. Version 0.3 contains a reliability-tested polygon-native vertical slice: stable authoring identities, a project semantic registry, deterministic baking, policy-aware local and cross-Area routing, scheduler-owned structured result views, bounded concurrent local Burst jobs, copy-on-write mutation snapshots, targeted revisions and caching, and an initial Scene authoring workflow.
+Areafinder is an authored navigation framework under active pre-1.0 development. Version 0.4 contains a reliability-tested polygon-native vertical slice: stable authoring identities, a project semantic registry, deterministic baking, policy-aware local and cross-Area routing, scheduler-owned structured result views, bounded concurrent local Burst jobs, copy-on-write mutation snapshots, targeted revisions and caching, replaceable exact local-search kernels, and an initial Scene authoring workflow.
 
-Version 0.3 retains the complete persistence, validation, request, cache, parity, idle-allocation, Windows-player, and Room-to-Room evidence from 0.2. It adds generation-safe physical work ownership, concurrent request execution, mutation snapshots, cap-one/cap-four baselines, and a 72-agent seeded HORDE Rigidbody stress/soak consumer. The public API and bake schema are still pre-1.0. Intra-request job fan-out, full-route allocation guarantees, global-search refinement, broad editor polish, schema evolution, and post-1.0 backends remain deferred.
+Version 0.4 retains the complete 0.3 runtime contract and adds a fixed admissible A* production kernel, a frozen reference solver, internal heap, bidirectional, and landmark strategies, generated differential coverage, and algorithm-focused benchmarks. The public API and bake schema are unchanged from 0.3 and remain pre-1.0. Automatic strategy selection, intra-request job fan-out, full-route allocation guarantees, shared-goal reuse, global-search refinement, broad editor polish, schema evolution, and post-1.0 backends remain deferred.
 
 ## Documentation
 
@@ -10,7 +10,7 @@ Version 0.3 retains the complete persistence, validation, request, cache, parity
 - [Authoring and baking](authoring.md): semantic registry, Areas, Portals, polygons, adjacency, validation, and editor workflow.
 - [Runtime and pathfinding](runtime.md): compiled data, policy, global and local routing, requests, revisions, and results.
 - [Semantic mask layout](semantic-mask-layout.md): benchmark method, recorded result, and the current fixed-stride decision.
-- [Performance baseline](performance-baseline.md): repeatable concurrency benchmark method and the 0.3 reference result.
+- [Performance baseline](performance-baseline.md): preserved 0.3 concurrency evidence and the 0.4 per-strategy benchmark method.
 - [Migration](migration.md): staged evolution from the working NavMesh prototype to the polygon backend.
 - [Testing](testing.md): current smoke tests, required behavioral coverage, and acceptance gates.
 

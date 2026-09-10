@@ -35,6 +35,7 @@ namespace NotRealGames.Areafinder
             internal NavigationSearch.State Search;
             internal bool LocalSearchPending;
             internal long PhysicalWorkId;
+            internal SearchDiagnostics Diagnostics;
         }
 
         private sealed class InFlightSearch
@@ -97,6 +98,19 @@ namespace NotRealGames.Areafinder
             NavigationBakeAsset bake,
             int cacheCapacityPerArea,
             int maxConcurrentSearches)
+            : this(
+                bake,
+                cacheCapacityPerArea,
+                maxConcurrentSearches,
+                new SearchExecutionOptions(SearchStrategy.AStar))
+        {
+        }
+
+        internal NavigationWorld(
+            NavigationBakeAsset bake,
+            int cacheCapacityPerArea,
+            int maxConcurrentSearches,
+            SearchExecutionOptions searchOptions)
         {
             if (maxConcurrentSearches < 1)
             {
@@ -109,7 +123,8 @@ namespace NotRealGames.Areafinder
             _data = new NavigationRuntimeData(
                 bake,
                 cacheCapacityPerArea,
-                EffectiveMaxConcurrentSearches);
+                EffectiveMaxConcurrentSearches,
+                searchOptions);
             _inFlight = new InFlightSearch[EffectiveMaxConcurrentSearches];
         }
 
@@ -120,6 +135,25 @@ namespace NotRealGames.Areafinder
         internal int ActiveSnapshotCount => _data.ActiveSnapshotCount;
         internal int CurrentSnapshotReferenceCount => _data.CurrentSnapshot.ReferenceCount;
         internal int AllocatedRequestSlotCount => _slots.Count;
+        internal bool PrepareSearchAccelerator(CompiledTraversalPolicy policy)
+        {
+            ThrowIfDisposed();
+            return _data.PolygonSearch.PrepareAccelerators(policy);
+        }
+
+        internal bool TryGetSearchDiagnostics(
+            PathRequestHandle handle,
+            out SearchDiagnostics diagnostics)
+        {
+            if (TryGetSlot(handle, out RequestSlot slot))
+            {
+                diagnostics = slot.Search?.Diagnostics ?? slot.Diagnostics;
+                return true;
+            }
+
+            diagnostics = default;
+            return false;
+        }
         internal bool IsPhysicalWorkInFlight(PathRequestHandle handle)
         {
             for (int index = 0; index < _inFlight.Length; index++)
@@ -263,6 +297,7 @@ namespace NotRealGames.Areafinder
             slot.Search = null;
             slot.LocalSearchPending = false;
             slot.PhysicalWorkId = 0L;
+            slot.Diagnostics = default;
             _freeSlots.Push(handle.Slot);
             return true;
         }
@@ -536,6 +571,7 @@ namespace NotRealGames.Areafinder
             slot.Search = null;
             slot.LocalSearchPending = false;
             slot.PhysicalWorkId = 0L;
+            slot.Diagnostics = default;
             return index;
         }
 
@@ -633,6 +669,7 @@ namespace NotRealGames.Areafinder
                     return TryScheduleLocalSearch(handle, slot, ref scheduledJobs);
 
                 case SearchAdvanceStatus.Completed:
+                    slot.Diagnostics = slot.Search.Diagnostics;
                     slot.Search.Dispose();
                     slot.Search = null;
                     if (!IsCurrent(result))
@@ -648,6 +685,7 @@ namespace NotRealGames.Areafinder
 
                 case SearchAdvanceStatus.Failed:
                     bool stale = slot.Search.CapturedStateChanged();
+                    slot.Diagnostics = slot.Search.Diagnostics;
                     slot.Search.Dispose();
                     slot.Search = null;
                     ScheduleTerminal(
@@ -766,8 +804,16 @@ namespace NotRealGames.Areafinder
             Exception error = null;
             try
             {
-                bool found = _data.PolygonSearch.Complete(physical.LaneIndex, out double totalCost);
-                physical.Search.CompleteLocal(_data.PolygonSearch, physical.LaneIndex, found, totalCost);
+                bool found = _data.PolygonSearch.Complete(
+                    physical.LaneIndex,
+                    out double totalCost,
+                    out SearchDiagnostics diagnostics);
+                physical.Search.CompleteLocal(
+                    _data.PolygonSearch,
+                    physical.LaneIndex,
+                    found,
+                    totalCost,
+                    diagnostics);
             }
             catch (Exception exception)
             {

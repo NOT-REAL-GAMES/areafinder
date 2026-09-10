@@ -331,6 +331,7 @@ namespace NotRealGames.Areafinder
             private bool _pendingCacheStore;
             private LocalCacheKey _pendingCacheKey;
             private bool _disposed;
+            private SearchDiagnostics _diagnostics;
 
             private State(
                 NavigationRuntimeData data,
@@ -369,6 +370,7 @@ namespace NotRealGames.Areafinder
             }
 
             internal LocalSearchRequest PendingLocalSearch { get; private set; }
+            internal SearchDiagnostics Diagnostics => _diagnostics;
 
             internal static bool TryCreate(
                 NavigationRuntimeData data,
@@ -511,8 +513,14 @@ namespace NotRealGames.Areafinder
                 }
             }
 
-            internal void CompleteLocal(BurstPolygonSearch search, int laneIndex, bool found, double totalCost)
+            internal void CompleteLocal(
+                BurstPolygonSearch search,
+                int laneIndex,
+                bool found,
+                double totalCost,
+                SearchDiagnostics diagnostics)
             {
+                _diagnostics.Add(diagnostics);
                 LocalSearchRequest request = PendingLocalSearch;
                 LocalPathData path = null;
                 if (found)

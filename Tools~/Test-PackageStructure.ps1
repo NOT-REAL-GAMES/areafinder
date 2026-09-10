@@ -70,7 +70,7 @@ Get-ChildItem -LiteralPath $root -Recurse -File |
 $manifest = Read-JsonObject (Join-Path $root 'package.json')
 if ($null -ne $manifest) {
     Assert-Equal $manifest.name 'com.notrealgames.areafinder' 'Package name'
-    Assert-Equal $manifest.version '0.3.0' 'Package version'
+    Assert-Equal $manifest.version '0.4.0' 'Package version'
     Assert-Equal $manifest.displayName 'Areafinder' 'Package display name'
     Assert-Equal $manifest.unity '6000.7' 'Unity version'
     Assert-Equal $manifest.unityRelease '0a6' 'Unity release'
