@@ -2,7 +2,7 @@
 
 The prototype under `VICIOUS CYCLE/Assets/Areafinder` remains a read-only behavioral oracle. The new package is an evolutionary replacement, not a source-compatible port and not a clean-room rewrite.
 
-The current 0.3 package is already polygon-native and contains no NavMesh or High Precision runtime code. Portable behavior is captured in package tests; no migration adapter has been added because the polygon path does not currently need one.
+The current 0.4 package is already polygon-native and contains no NavMesh or High Precision runtime code. Portable behavior is captured in package tests; no migration adapter has been added because the polygon path does not currently need one.
 
 ## Behavior to preserve
 
@@ -37,7 +37,7 @@ Completion requires static checks that core package source contains no reference
 
 HORDE is the manual integration project for authoring, policy preview, side-by-side reference scenes, and Rigidbody consumers. Package tests remain authoritative and run in disposable Unity projects so HORDE state cannot hide package dependencies.
 
-The 0.3 dogfood gate creates two navigable Areas and runs 72 seeded agents through concurrent cancellation, mutation staleness, closed-Portal failure, reopening, replanning, destruction/respawn, and a longer diagnostic soak, then feeds recovered steering guidance to project-owned kinematic Rigidbody consumers. This integration deliberately leaves locomotion, collisions, steering ownership, avoidance, and replanning policy in HORDE; Areafinder adds no package-level agent abstraction.
+The 0.4 dogfood gate keeps the existing two-Area, 72-agent scenario on the normal public API while production local requests use A*. HORDE owns non-kinematic Rigidbody acceleration and overshoot, physical collision, cancellation, mutation staleness, closed-Portal failure, reopening, replanning, destruction/respawn, and the longer diagnostic soak. The HORDE stress agent neither selects nor observes Areafinder's internal search strategy; a separate friend gate observer may collect internal metrics without leaking those details into gameplay code. Areafinder adds no package-level agent abstraction.
 
 ## Post-1.0 validation
 

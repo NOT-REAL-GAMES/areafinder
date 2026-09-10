@@ -6,6 +6,28 @@ The format follows [Keep a Changelog](https://keepachangelog.com/en/1.1.0/), and
 
 ## [Unreleased]
 
+## [0.4.0] - 2026-09-10
+
+### Added
+
+- Added a deterministic reusable local-search substrate with the frozen 0.3 linear-scan solver, heap Dijkstra, admissible A*, bidirectional Dijkstra, bidirectional A*, ALT A*, and bidirectional ALT as independently selectable internal strategies.
+- Added Burst-compatible deterministic heaps, reverse adjacency for directed traversal, one-lane bidirectional frontier state, and reusable scratch storage.
+- Added immutable policy-specific landmark accelerators with deterministic landmark selection, directed from/to distance tables, snapshot-compatible leases, and safe non-ALT fallback when data is missing or incompatible.
+- Added internal generation-safe diagnostics for executed strategy, fallback, discovered and expanded nodes, examined edges, heap work, frontier size, heuristic work, and accelerator resource use.
+- Added differential, generated-graph, heuristic-admissibility, bidirectional-adversarial, mutation, cancellation, and cap-one/cap-four parity coverage across compatible strategies.
+
+### Changed
+
+- Made deterministic admissible A* the fixed production local-search strategy while preserving same-polygon and valid Portal-pair cache fast paths.
+- Kept global Area/Portal routing managed and resumable; every request still owns at most one physical local-search job and scratch lane at a time.
+- Raised the package and documentation version to `0.4.0` without changing package ID `com.notrealgames.areafinder`, public requests/results, scheduler semantics, bake schema 1, or fixed-stride semantic storage.
+- Raised the disposable-host Play Mode discovery floor to 211 cases.
+
+### Documentation
+
+- Preserved the measured 0.3 concurrency baseline and recorded the 0.4 cap-one algorithm matrix, cap-four composition check, attribution rules, admissibility model, and environment metadata.
+- Deferred automatic strategy selection, shared-goal reuse, hierarchical accelerators, hand-written SIMD, end-to-end zero-allocation result ownership, generated topology, locomotion, agents, crowds, and avoidance.
+
 ## [0.3.0] - 2026-09-08
 
 ### Added
