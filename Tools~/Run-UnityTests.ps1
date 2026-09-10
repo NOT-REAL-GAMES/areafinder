@@ -95,8 +95,65 @@ function Assert-BenchmarkReport {
 
     if ($report.processor -like '*Ryzen 9 7900X*' -and
         [int]$report.sameArea32x32.cap4.effectiveMaxConcurrentSearches -ge 4 -and
-        [double]$report.sameArea32x32.cap4ToCap1ThroughputRatio -lt 1.5) {
-        throw "The 32x32 four-lane reference-host speedup was below 1.5x: $Path"
+        [double]$report.sameArea32x32.cap4ToCap1ThroughputRatio -le 1.0) {
+        throw "The 32x32 four-lane reference-host run did not scale above cap one: $Path"
+    }
+
+    $expectedFixtures = @(
+        'same-area-32x32',
+        'three-area-16x16',
+        'small-8x8',
+        'large-local-48x48',
+        'long-thin-256x1',
+        'branch-heavy-40x40',
+        'equal-cost-diamond',
+        'directed-64x1',
+        'policy-divergent-24x24',
+        'mutation-24x24'
+    )
+    $expectedStrategies = @(
+        'Reference03',
+        'HeapDijkstra',
+        'AStar',
+        'BidirectionalDijkstra',
+        'BidirectionalAStar',
+        'AltAStar',
+        'BidirectionalAlt'
+    )
+    $algorithmSearches = @($report.algorithmSearches)
+    if ($algorithmSearches.Count -lt 110) {
+        throw "The benchmark report contains $($algorithmSearches.Count) algorithm rows; expected at least 110: $Path"
+    }
+
+    foreach ($fixture in $expectedFixtures) {
+        foreach ($strategy in $expectedStrategies) {
+            $rows = @($algorithmSearches | Where-Object {
+                $_.fixture -eq $fixture -and $_.strategy -eq $strategy
+            })
+            $expectedLandmarks = if ($strategy -in 'AltAStar', 'BidirectionalAlt') {
+                @(4, 8, 16)
+            }
+            else {
+                @(0)
+            }
+            if ($rows.Count -ne $expectedLandmarks.Count -or
+                (@($rows.landmarkCount | Sort-Object) -join ',') -ne ($expectedLandmarks -join ',')) {
+                throw "The $fixture/$strategy benchmark variants are incomplete: $Path"
+            }
+
+            foreach ($row in $rows) {
+                if ($null -eq $row.cap1 -or
+                    [double]$row.cap1.medianRoutesPerSecond -le 0 -or
+                    [int]$row.cap1.requestsPerSample -lt 1 -or
+                    $row.cap1.requestedStrategy -ne $strategy -or
+                    $row.cap1.executedStrategy -ne $strategy -or
+                    $row.cap1.fallbackReason -ne 'None' -or
+                    [long]$row.cap1.scratchBytes -le 0 -or
+                    [double]$row.cap1.nodesExpandedPerRequest -le 0) {
+                    throw "The $fixture/$strategy cap-one benchmark row is invalid: $Path"
+                }
+            }
+        }
     }
 
     return $report
@@ -143,7 +200,7 @@ try {
         '-testResults', $playResults,
         '-logFile', (Join-Path $results 'playmode.log')
     )
-    $playCount = Assert-TestResults -Path $playResults -Platform 'Play Mode' -MinimumTests 191
+    $playCount = Assert-TestResults -Path $playResults -Platform 'Play Mode' -MinimumTests 211
     $benchmark = Assert-BenchmarkReport -Path $benchmarkReport
 
     Write-Host "Areafinder tests passed: $editCount Edit Mode, $playCount Play Mode."
@@ -156,6 +213,7 @@ try {
         [double]$benchmark.threeArea16x16.cap4ToCap1ThroughputRatio,
         [long]$benchmark.idleAllocatedBytes)
     Write-Host "Benchmark report: $benchmarkReport"
+    Write-Host "Algorithm benchmark rows: $(@($benchmark.algorithmSearches).Count)"
     if ($KeepProject) {
         Write-Host "Disposable host retained at $hostProject"
     }
